@@ -1,0 +1,47 @@
+{
+  "name": "reasoning.run",
+  "version": "0.1.0",
+  "description": "Local deep-research agent composer — runs on your machine, zero-config after the first query. Built on @lloyal-labs/*.",
+  "bin": {
+    "reasoning.run": "./bin/run.js"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "smoke": "tsx src/tui-ink/__bus-smoke.ts && tsx src/tui-ink/__reducer-smoke.ts && tsx src/tui-ink/__config-smoke.ts && tsx src/__download-smoke.ts",
+    "smoke:visual": "tsx src/tui-ink/__visual-smoke.tsx"
+  },
+  "dependencies": {
+    "@lloyal-labs/lloyal-agents": "^2.0.0",
+    "@lloyal-labs/lloyal.node": "^2.1.0",
+    "@lloyal-labs/rig": "^2.0.0",
+    "@lloyal-labs/sdk": "^2.0.0",
+    "effection": "^4.0.2",
+    "eta": "^4.5.1",
+    "ink": "^7.0.1",
+    "react": "^19.2.5",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "@types/react": "^19.2.14",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "deep-research",
+    "local-llm",
+    "agents",
+    "llama.cpp",
+    "cli",
+    "tui",
+    "ink"
+  ],
+  "repository": "github:lloyal-ai/reasoning.run",
+  "license": "Apache-2.0"
+}
