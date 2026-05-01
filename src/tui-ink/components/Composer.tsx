@@ -17,7 +17,7 @@ import type { AppState } from '../state';
 import { useCommand } from '../hooks/useCommand';
 import { TextInput } from './TextInput';
 
-type Field = 'query' | 'menu' | 'tavily' | 'corpus';
+type Field = 'query' | 'menu' | 'tavily' | 'corpus' | 'output';
 
 export interface ComposerProps {
   state: AppState;
@@ -46,6 +46,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
 
   const tavilyOrigin = state.configOrigin?.tavilyKey ?? 'unset';
   const corpusOrigin = state.configOrigin?.corpusPath ?? 'unset';
+  const outputOrigin = state.configOrigin?.outputDir ?? 'default';
   const hasTavily = tavilyOrigin !== 'unset';
   const hasCorpus = corpusOrigin !== 'unset';
   const hasSource = hasTavily || hasCorpus;
@@ -108,6 +109,11 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         setDraft(state.config?.sources.corpusPath ?? '');
         return;
       }
+      if (input === 'O' || input === 'o') {
+        setField('output');
+        setDraft(state.config?.sources.outputDir ?? '');
+        return;
+      }
       // Any other key: drop back to query, swallowing the key (intentional —
       // users pressed Esc to enter menu, so unrelated keys shouldn't leak
       // into the query text).
@@ -146,6 +152,13 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
     setDraft('');
   };
 
+  const commitOutput = (): void => {
+    // Empty submission clears the field → falls back to default (cwd).
+    dispatch({ type: 'set_output_dir', path: draft.trim() });
+    setField('query');
+    setDraft('');
+  };
+
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
       {/* Main row: query input, menu mode, or inline editor */}
@@ -179,7 +192,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
             placeholder="tvly-..."
           />
         </Box>
-      ) : (
+      ) : field === 'corpus' ? (
         <Box>
           <Text color="yellow">Corpus path › </Text>
           <TextInput
@@ -189,6 +202,18 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
             onCancel={() => { setField('query'); setDraft(''); }}
             focused
             placeholder="/path/to/docs"
+          />
+        </Box>
+      ) : (
+        <Box>
+          <Text color="yellow">Output dir › </Text>
+          <TextInput
+            value={draft}
+            onChange={setDraft}
+            onSubmit={commitOutput}
+            onCancel={() => { setField('query'); setDraft(''); }}
+            focused
+            placeholder={`${process.cwd()} (default)`}
           />
         </Box>
       )}
@@ -210,6 +235,13 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
           hotkey="C"
           origin={corpusOrigin}
           value={state.config?.sources.corpusPath ?? null}
+        />
+        <Text>  </Text>
+        <SourceChip
+          label="Output"
+          hotkey="O"
+          origin={outputOrigin}
+          value={state.config?.sources.outputDir ?? null}
         />
         <Box flexGrow={1} />
         <HintRow

@@ -18,4 +18,5 @@ export type Command =
   | { type: 'change_mode'; mode: 'flat' | 'deep' }
   | { type: 'set_tavily_key'; key: string }
   | { type: 'set_corpus_path'; path: string }
+  | { type: 'set_output_dir'; path: string }
   | { type: 'quit' };

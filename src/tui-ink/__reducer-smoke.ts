@@ -539,6 +539,7 @@ check('config:updated produces a toast; skipped fields flagged', () => {
     modelPath: 'default' as const,
     reranker: 'default' as const,
     nCtx: 'default' as const,
+    outputDir: 'default' as const,
   };
   const s = drive([
     {

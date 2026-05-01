@@ -18,6 +18,9 @@ import * as path from 'node:path';
 export interface ConfigSources {
   tavilyKey?: string;
   corpusPath?: string;
+  /** Where per-query run-dirs (report.md + annexure-N.md) and the session
+   *  trace.jsonl get written. Default = process.cwd() at boot. */
+  outputDir?: string;
 }
 
 export interface ConfigDefaults {
@@ -51,6 +54,7 @@ export interface ConfigOrigin {
   modelPath: 'cli' | 'file' | 'default';
   reranker: 'cli' | 'file' | 'default';
   nCtx: 'cli' | 'env' | 'file' | 'default';
+  outputDir: 'cli' | 'file' | 'default';
 }
 
 export interface LoadedConfig {
@@ -68,6 +72,7 @@ export interface CliOverrides {
   modelPath?: string;
   reranker?: string;
   nCtx?: number;
+  outputDir?: string;
 }
 
 export interface SaveResult {
@@ -134,6 +139,7 @@ export function loadConfig(
   // ── Merge with precedence: CLI > env > file > default ──
   const tavilyKey = cli.tavilyKey ?? envTavily ?? base.sources.tavilyKey;
   const corpusPath = cli.corpusPath ?? base.sources.corpusPath;
+  const outputDir = cli.outputDir ?? base.sources.outputDir;
   const reasoningMode =
     cli.reasoningMode ?? base.defaults.reasoningMode ?? 'deep';
   const modelPath = cli.modelPath ?? base.model.path;
@@ -142,7 +148,7 @@ export function loadConfig(
 
   const config: Config = {
     version: 1,
-    sources: { tavilyKey, corpusPath },
+    sources: { tavilyKey, corpusPath, outputDir },
     defaults: {
       reasoningMode,
       verifyCount: base.defaults.verifyCount,
@@ -178,6 +184,11 @@ export function loadConfig(
         : fromFile?.model.nCtx !== undefined
           ? 'file'
           : 'default',
+    outputDir: cli.outputDir
+      ? 'cli'
+      : fromFile?.sources.outputDir
+        ? 'file'
+        : 'default',
   };
 
   return { config, origin, path: resolvedPath, loadedFromFile: !!fromFile };
@@ -205,6 +216,7 @@ export function saveConfig(
   // Empty string = explicit clear. Delete the key rather than persisting ''.
   if (patch.sources?.tavilyKey === '') delete nextSources.tavilyKey;
   if (patch.sources?.corpusPath === '') delete nextSources.corpusPath;
+  if (patch.sources?.outputDir === '') delete nextSources.outputDir;
   if (env.TAVILY_API_KEY && patch.sources && 'tavilyKey' in patch.sources) {
     // Env wins — drop any attempted write of the secret.
     delete nextSources.tavilyKey;

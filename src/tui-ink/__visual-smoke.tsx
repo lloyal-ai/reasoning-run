@@ -34,6 +34,7 @@ main(function* () {
     modelPath: 'default',
     reranker: 'default',
     nCtx: 'default',
+    outputDir: 'default',
   };
 
   yield* spawn(function* () {

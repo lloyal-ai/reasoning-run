@@ -68,6 +68,7 @@ import {
   resolveModelPath,
   type ModelCatalogEntry,
 } from "./models";
+import { RunDirSink } from "./run-dir";
 
 // ── CLI args ─────────────────────────────────────────────────────
 
@@ -84,9 +85,9 @@ const { values: flags, positionals } = parseArgs({
     "findings-budget": { type: "string" },
     "reasoning-mode": { type: "string" },
     "n-ctx": { type: "string" },
+    "output-dir": { type: "string" },
     jsonl: { type: "boolean", default: false },
     verbose: { type: "boolean", default: false },
-    trace: { type: "boolean", default: false },
   },
   allowPositionals: true,
 });
@@ -106,7 +107,7 @@ if (
 const cliModelPath = positionals[0] || undefined;
 const jsonlMode = flags.jsonl;
 const verbose = flags.verbose;
-const trace = flags.trace;
+const cliOutputDir = flags["output-dir"];
 const initialQuery = flags.query;
 const configPath = flags.config ?? DEFAULT_CONFIG_PATH;
 
@@ -126,6 +127,7 @@ const loaded = loadConfig(configPath, {
   corpusPath: flags.corpus,
   reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
   nCtx: nCtxCli,
+  outputDir: cliOutputDir,
 });
 let liveConfig: Config = loaded.config;
 let liveOrigin = loaded.origin;
@@ -145,7 +147,7 @@ if (jsonlMode) setJsonlMode(true);
 if (verbose) setVerboseMode(true);
 
 // Silence llama.cpp stderr in default mode.
-const quietMode = !verbose && !jsonlMode && !trace;
+const quietMode = !verbose && !jsonlMode;
 if (quietMode) {
   try {
     fs.closeSync(2);
@@ -379,18 +381,42 @@ main(function* () {
   uiChannel.send({ type: "weights:done" });
 
   // ── Session + event forwarding ─────────────────────────────
-  const traceWriter = trace
-    ? new JsonlTraceWriter(fs.openSync(`trace-${Date.now()}.jsonl`, "w"))
-    : undefined;
+  // Session-scoped trace: one trace.jsonl per process invocation, captures
+  // every query (including warm follow-ups) in one file. Always-on; the
+  // file is created upfront under the user's output-dir.
+  const sessionOutputDir = path.resolve(
+    liveConfig.sources.outputDir ?? process.cwd(),
+  );
+  fs.mkdirSync(sessionOutputDir, { recursive: true });
+  const sessionTraceTs = new Date()
+    .toISOString()
+    .replace(/[:.]/g, "-")
+    .replace("Z", "");
+  const sessionTracePath = path.join(
+    sessionOutputDir,
+    `trace-${sessionTraceTs}.jsonl`,
+  );
+  const sessionTraceFd = fs.openSync(sessionTracePath, "w");
+  const traceWriter = new JsonlTraceWriter(sessionTraceFd);
+  yield* ensure(() => {
+    traceWriter.flush();
+    try {
+      fs.closeSync(sessionTraceFd);
+    } catch {
+      /* non-fatal */
+    }
+  });
+
+  const runDirSink = new RunDirSink();
 
   const { session, events } = yield* initAgents<WorkflowEvent>(ctx, {
     traceWriter,
   });
 
-  // Forward all runtime events from initAgents into the UI channel so Ink
-  // (or the JSONL drainer) sees the unified stream.
+  // Forward all runtime events: per-query artifact sink first, then UI.
   yield* spawn(function* () {
     for (const ev of yield* each(events)) {
+      runDirSink.handle(ev as WorkflowEvent);
       uiChannel.send(ev as WorkflowEvent);
       yield* each.next();
     }
@@ -403,10 +429,17 @@ main(function* () {
   const harnessOpts = {
     verifyCount: VERIFY_COUNT,
     maxTurns: MAX_TOOL_TURNS,
-    trace,
     findingsMaxChars,
     reasoningMode: liveConfig.defaults.reasoningMode,
   };
+
+  // Helper: start a per-query run-dir before any operation that produces
+  // artifacts (research or passthrough). Reads liveConfig at call time so
+  // composer-driven output-dir changes take effect on the next query.
+  function startRunDir(query: string, mode: "flat" | "deep"): void {
+    const outputDir = liveConfig.sources.outputDir ?? process.cwd();
+    runDirSink.start({ outputDir, query, mode });
+  }
 
   // ── JSONL / --query scripted path ──────────────────────────
   // When Ink isn't mounted, fall back to the existing handleQuery
@@ -424,6 +457,7 @@ main(function* () {
       );
       process.exit(2);
     }
+    startRunDir(initialQuery, liveConfig.defaults.reasoningMode);
     yield* handleQuery(initialQuery, session, sources, reranker, harnessOpts);
     return;
   }
@@ -449,6 +483,7 @@ main(function* () {
       reasoningMode: mode,
     });
     if (plan.intent === "passthrough") {
+      startRunDir(initialQuery, mode);
       yield* runPassthroughBranch(initialQuery, session, plan, wallStartMs);
       yield* events.send({ type: "ui:composer" });
     } else {
@@ -475,6 +510,29 @@ main(function* () {
           reranker: flags.reranker,
           corpusPath: flags.corpus,
           reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+          outputDir: cliOutputDir,
+        });
+        liveConfig = reloaded.config;
+        liveOrigin = reloaded.origin;
+        yield* events.send({
+          type: "config:updated",
+          config: liveConfig,
+          origin: liveOrigin,
+          savedTo: saved.path,
+          gitignored: saved.gitignored,
+          skipped: saved.skipped,
+        });
+      } else if (cmd.type === "set_output_dir") {
+        const saved = saveConfig(
+          { sources: { outputDir: cmd.path } },
+          configPath,
+        );
+        const reloaded = loadConfig(configPath, {
+          modelPath: cliModelPath,
+          reranker: flags.reranker,
+          corpusPath: flags.corpus,
+          reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+          outputDir: cliOutputDir,
         });
         liveConfig = reloaded.config;
         liveOrigin = reloaded.origin;
@@ -496,6 +554,7 @@ main(function* () {
           reranker: flags.reranker,
           corpusPath: flags.corpus,
           reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+          outputDir: cliOutputDir,
         });
         liveConfig = reloaded.config;
         liveOrigin = reloaded.origin;
@@ -528,6 +587,7 @@ main(function* () {
           context: plannerContext,
         });
         if (plan.intent === "passthrough") {
+          startRunDir(cmd.query, cmd.mode);
           yield* runPassthroughBranch(cmd.query, session, plan, wallStartMs);
           yield* events.send({ type: "ui:composer" });
         } else if (plan.intent === "clarify") {
@@ -565,6 +625,7 @@ main(function* () {
           context: plannerContext,
         });
         if (plan.intent === "passthrough") {
+          startRunDir(origQuery, mode);
           yield* runPassthroughBranch(origQuery, session, plan, wallStartMs);
           pendingPlan = null;
           yield* events.send({ type: "ui:composer" });
@@ -588,6 +649,7 @@ main(function* () {
           context: plannerContext,
         });
         if (plan.intent === "passthrough") {
+          startRunDir(pendingPlan.query, cmd.mode);
           yield* runPassthroughBranch(
             pendingPlan.query,
             session,
@@ -618,6 +680,7 @@ main(function* () {
           pendingPlan = null;
           continue;
         }
+        startRunDir(pendingPlan.query, pendingPlan.mode);
         yield* runResearchBranch(
           pendingPlan.query,
           pendingPlan.plan,

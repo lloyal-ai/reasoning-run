@@ -81,7 +81,6 @@ export type QueryResult =
 export interface HarnessOpts {
   verifyCount: number;
   maxTurns: number;
-  trace: boolean;
   findingsMaxChars?: number;
   reasoningMode: "flat" | "deep";
 }
@@ -369,7 +368,6 @@ export function* runResearchBranch(
         maxTurns: opts.maxTurns,
         pruneOnReport: true,
         policy: createResearchPolicy(),
-        trace: opts.trace,
         scorer: primaryScorer,
         enableThinking: true,
         orchestrate:
@@ -483,7 +481,6 @@ export function* runResearchBranch(
         parent: queryRoot,
         terminalTool: "report",
         maxTurns: opts.maxTurns,
-        trace: opts.trace,
       });
 
       synthTimeMs = synthT();

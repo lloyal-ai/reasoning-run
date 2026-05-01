@@ -24,7 +24,8 @@ State lives in `./harness.json` (auto-created, auto-gitignored on first save):
 {
   "sources": {
     "tavilyKey": "tvly-...",           // optional — web search via Tavily
-    "corpusPath": "/path/to/docs"      // optional — local markdown corpus
+    "corpusPath": "/path/to/docs",     // optional — local markdown corpus
+    "outputDir": "./reasoning-runs"    // optional — defaults to cwd
   },
   "defaults": {
     "reasoningMode": "deep"            // or "flat"
@@ -41,10 +42,30 @@ Press `Esc` to open the menu mode:
 
 - `W` → set Tavily key (or clear with empty)
 - `C` → set corpus path (or clear with empty)
+- `O` → set output dir (or clear to fall back to cwd)
 - `T` → toggle Deep / Fast reasoning
 - `Esc` → back to the query input
 
 Everything persists to `harness.json` the moment you save.
+
+## Run artifacts
+
+Every query writes a self-contained bundle under `<output-dir>/<ISO-timestamp>/`:
+
+```
+<output-dir>/
+  trace-2026-05-01T12-34-56.jsonl       ← session trace (one per process invocation)
+  2026-05-01T12-34-56/                  ← query 1
+    report.md                           ← synth answer + metadata + annexure index
+    annexure-1.md                       ← research agent 1's report
+    annexure-2.md
+    annexure-3.md
+  2026-05-01T13-02-11/                  ← follow-up query 2
+    report.md
+    annexure-1.md
+```
+
+`<output-dir>` defaults to the directory you launched from. Override with `--output-dir <path>` or the composer's `O` hotkey. The session trace captures every query (including warm follow-ups) in one file.
 
 ### Environment overrides
 
