@@ -47,11 +47,12 @@ jobs:
             exit 1
           fi
 
-      # --access public is required when --provenance is set, even for
-      # unscoped packages: npm guards against accidentally publishing
-      # provenance metadata for a package the maintainer didn't intend
-      # to make public. --provenance attaches a sigstore attestation
-      # tying the build to this commit + workflow run.
+      # --provenance NOT used here. npm provenance requires a public
+      # source repo, but reasoning-run is intentionally internal: the
+      # proprietary LICENSE + bundled-only npm tarball are deliberate
+      # IP protection. Making the repo public to satisfy provenance
+      # would defeat that posture. Token-based publish is still the
+      # baseline industry-standard for closed-source CLIs.
       - name: Publish to npm
         if: success() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.skip_publish))
         run: |
@@ -61,7 +62,7 @@ jobs:
             echo "⏭ $name@$version already published, skipping"
           else
             echo "Publishing $name@$version..."
-            npm publish --access public --provenance
+            npm publish --access public
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
