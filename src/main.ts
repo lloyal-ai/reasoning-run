@@ -218,10 +218,14 @@ function* indexCorpus(
   const files = (ig ? all.filter((f) => !ig.ignores(f)) : all).sort();
 
   if (files.length === 0) {
-    process.stderr.write(
-      `Error: no .md(x) files matched: ${cwd}/${effectivePattern}\n`,
+    // Throw rather than process.exit — callers (boot eager-index + the
+    // /scan command handler) catch this and surface a recoverable toast
+    // so the user can fix the path without restarting. Writing to stderr
+    // mid-Ink-render also corrupts the terminal; throwing keeps output
+    // clean.
+    throw new Error(
+      `No .md(x) files at ${cwd}${pattern ? ` matching ${pattern}` : ''}`,
     );
-    process.exit(1);
   }
 
   channel.send({
@@ -640,17 +644,29 @@ main(function* () {
   // sees per-file progress in the boot status line. Avoids a silent
   // 30-second-to-minutes pause on the first query when the corpus has
   // hundreds of files (recursive **/*.{md,mdx} walk).
+  //
+  // Tolerate failure: a stale harness.json with a no-longer-valid
+  // corpusPath (dir deleted, drive unmounted, etc.) must NOT crash boot.
+  // Surface as a toast and continue — user can /scan a new path or clear
+  // via empty value. Boot completes either way.
   if (liveConfig.sources.corpusPath) {
-    const indexed = yield* indexCorpus(
-      liveConfig.sources.corpusPath,
-      uiChannel,
-    );
-    uiChannel.send({
-      type: "corpus:indexed",
-      corpusPath: liveConfig.sources.corpusPath,
-      fileCount: indexed.resources.length,
-      chunkCount: indexed.chunks.length,
-    });
+    try {
+      const indexed = yield* indexCorpus(
+        liveConfig.sources.corpusPath,
+        uiChannel,
+      );
+      uiChannel.send({
+        type: "corpus:indexed",
+        corpusPath: liveConfig.sources.corpusPath,
+        fileCount: indexed.resources.length,
+        chunkCount: indexed.chunks.length,
+      });
+    } catch (err) {
+      uiChannel.send({
+        type: "ui:error",
+        message: `Corpus disabled: ${(err as Error).message}. Use /scan to fix.`,
+      });
+    }
   }
 
   // Transition reducer out of 'loading' into 'composer'. (config:loaded was
@@ -781,6 +797,34 @@ main(function* () {
         });
       } else if (cmd.type === "set_corpus_path") {
         const resolved = cmd.path ? resolvePath(cmd.path) : "";
+        // Validate BEFORE persisting. A bad path that lands in
+        // harness.json bricks every subsequent boot until the user
+        // hand-edits the file. Empty path always succeeds (it clears).
+        if (resolved) {
+          uiChannel.send({
+            type: "weights:start",
+            label: "Indexing corpus…",
+          });
+          let indexed: { resources: unknown[]; chunks: unknown[] };
+          try {
+            indexed = yield* indexCorpus(resolved, uiChannel);
+          } catch (err) {
+            uiChannel.send({ type: "weights:done" });
+            yield* events.send({
+              type: "ui:error",
+              message: `Cannot use ${resolved}: ${(err as Error).message}`,
+            });
+            continue;
+          }
+          uiChannel.send({
+            type: "corpus:indexed",
+            corpusPath: resolved,
+            fileCount: indexed.resources.length,
+            chunkCount: indexed.chunks.length,
+          });
+          uiChannel.send({ type: "weights:done" });
+        }
+        // Path validated (or empty) — persist + reload.
         const saved = saveConfig(
           { sources: { corpusPath: resolved } },
           configPath,
@@ -802,27 +846,7 @@ main(function* () {
           gitignored: saved.gitignored,
           skipped: saved.skipped,
         });
-        // Index the new corpus path so the next query doesn't pause silently.
-        // Re-uses the same loading-status pattern boot uses; user sees the
-        // indexing progress before the composer regains focus.
-        if (liveConfig.sources.corpusPath) {
-          uiChannel.send({
-            type: "weights:start",
-            label: "Indexing corpus…",
-          });
-          const indexed = yield* indexCorpus(
-            liveConfig.sources.corpusPath,
-            uiChannel,
-          );
-          uiChannel.send({
-            type: "corpus:indexed",
-            corpusPath: liveConfig.sources.corpusPath,
-            fileCount: indexed.resources.length,
-            chunkCount: indexed.chunks.length,
-          });
-          uiChannel.send({ type: "weights:done" });
-          yield* events.send({ type: "ui:composer" });
-        }
+        if (resolved) yield* events.send({ type: "ui:composer" });
       } else if (cmd.type === "submit_query") {
         const wallStartMs = performance.now();
         const sources = buildSources(liveConfig);
