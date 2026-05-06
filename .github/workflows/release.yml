@@ -47,9 +47,11 @@ jobs:
             exit 1
           fi
 
-      # Unscoped package — public is the default, no --access flag needed.
-      # --provenance attaches a sigstore attestation tying the build to
-      # this commit + workflow run; surfaced on the npm package page.
+      # --access public is required when --provenance is set, even for
+      # unscoped packages: npm guards against accidentally publishing
+      # provenance metadata for a package the maintainer didn't intend
+      # to make public. --provenance attaches a sigstore attestation
+      # tying the build to this commit + workflow run.
       - name: Publish to npm
         if: success() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.skip_publish))
         run: |
@@ -59,7 +61,7 @@ jobs:
             echo "⏭ $name@$version already published, skipping"
           else
             echo "Publishing $name@$version..."
-            npm publish --provenance
+            npm publish --access public --provenance
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

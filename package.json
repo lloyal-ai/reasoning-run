@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Local deep-research agent composer — runs on your machine, zero-config after the first query. Built on @lloyal-labs/*.",
   "bin": {
-    "reasoning.run": "./bin/run.js"
+    "reasoning.run": "bin/run.js"
   },
   "files": [
     "bin",
@@ -49,6 +49,9 @@
     "tui",
     "ink"
   ],
-  "repository": "github:lloyal-ai/reasoning-run",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lloyal-ai/reasoning-run.git"
+  },
   "license": "SEE LICENSE IN LICENSE"
 }
