@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - run: npm install
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Smoke tests
+        run: npm run smoke
+
+      - name: Build bundle
+        run: npm run build
+
+      # Catches bundle-only bugs that the tsx-based smoke suite can't see
+      # (e.g., CJS interop hazards in ESM output, missing externals).
+      - name: Verify bundle boots
+        run: |
+          out=$(timeout 3 node bin/run.js 2>&1 | head -5 || true)
+          echo "$out"
+          echo "$out" | grep -q "Deep Research"

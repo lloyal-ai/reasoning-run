@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      skip_publish:
+        description: 'Skip npm publish (for testing)'
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm install
+      - run: npx tsc --noEmit
+      - run: npm run smoke
+      - run: npm run build
+
+      - name: Verify bundle boots
+        run: |
+          out=$(timeout 3 node bin/run.js 2>&1 | head -5 || true)
+          echo "$out"
+          echo "$out" | grep -q "Deep Research"
+
+      # Guards against `git tag v0.1.1` while package.json says 0.1.0.
+      - name: Tag matches package version
+        if: github.event_name == 'push'
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version=$(node -p "require('./package.json').version")
+          if [ "$tag" != "v$version" ]; then
+            echo "Tag $tag does not match package version v$version" >&2
+            exit 1
+          fi
+
+      # Unscoped package — public is the default, no --access flag needed.
+      # --provenance attaches a sigstore attestation tying the build to
+      # this commit + workflow run; surfaced on the npm package page.
+      - name: Publish to npm
+        if: success() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.skip_publish))
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "⏭ $name@$version already published, skipping"
+          else
+            echo "Publishing $name@$version..."
+            npm publish --provenance
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
