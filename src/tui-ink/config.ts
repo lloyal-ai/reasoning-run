@@ -14,6 +14,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { resolvePath } from './path-utils';
 
 export interface ConfigSources {
   tavilyKey?: string;
@@ -137,12 +138,19 @@ export function loadConfig(
     : undefined;
 
   // ── Merge with precedence: CLI > env > file > default ──
+  // Path-shaped fields (corpusPath, outputDir, modelPath) get resolved
+  // through resolvePath: ~ expansion + relative→absolute. Idempotent on
+  // already-absolute paths. Defensive against stale harness.json values
+  // written before the boundary-resolve pattern landed (literal "~").
   const tavilyKey = cli.tavilyKey ?? envTavily ?? base.sources.tavilyKey;
-  const corpusPath = cli.corpusPath ?? base.sources.corpusPath;
-  const outputDir = cli.outputDir ?? base.sources.outputDir;
+  const rawCorpusPath = cli.corpusPath ?? base.sources.corpusPath;
+  const corpusPath = rawCorpusPath ? resolvePath(rawCorpusPath) : undefined;
+  const rawOutputDir = cli.outputDir ?? base.sources.outputDir;
+  const outputDir = rawOutputDir ? resolvePath(rawOutputDir) : undefined;
   const reasoningMode =
     cli.reasoningMode ?? base.defaults.reasoningMode ?? 'deep';
-  const modelPath = cli.modelPath ?? base.model.path;
+  const rawModelPath = cli.modelPath ?? base.model.path;
+  const modelPath = rawModelPath ? resolvePath(rawModelPath) : undefined;
   const reranker = cli.reranker ?? base.model.reranker;
   const nCtx = cli.nCtx ?? envNCtx ?? base.model.nCtx;
 

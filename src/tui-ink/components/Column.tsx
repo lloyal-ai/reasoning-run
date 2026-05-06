@@ -22,7 +22,7 @@ function isActive(agent: AgentRuntime): boolean {
 
 // ── Per-item renderers ─────────────────────────────────────────
 
-const ThinkItem = memo(function ThinkItem({
+export const ThinkItem = memo(function ThinkItem({
   item,
   color,
 }: {
@@ -73,7 +73,7 @@ function stripFirstLineIfTitle(body: string): string {
   return body.slice(nl + 1).trimStart();
 }
 
-const ToolCallItem = memo(function ToolCallItem({
+export const ToolCallItem = memo(function ToolCallItem({
   item,
 }: {
   item: Extract<TimelineItem, { kind: 'tool_call' }>;
@@ -87,7 +87,7 @@ const ToolCallItem = memo(function ToolCallItem({
   );
 });
 
-const ToolResultItem = memo(function ToolResultItem({
+export const ToolResultItem = memo(function ToolResultItem({
   item,
 }: {
   item: Extract<TimelineItem, { kind: 'tool_result' }>;
@@ -113,7 +113,7 @@ const ToolResultItem = memo(function ToolResultItem({
   );
 });
 
-const ReportItem = memo(function ReportItem({
+export const ReportItem = memo(function ReportItem({
   item,
   color,
 }: {

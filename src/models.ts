@@ -15,6 +15,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import pkg from "../package.json";
+
+/** Identifies this client to the lloyal CDN (bundled into all release builds)
+ *  and to upstream Huggingface (good citizenship). The CDN's auth Worker may
+ *  reject unknown UAs to deflect cheap mirroring abuse. */
+const USER_AGENT = `reasoning.run/${pkg.version}`;
 
 // ── Catalog ──────────────────────────────────────────────────────
 
@@ -25,8 +31,11 @@ export interface ModelCatalogEntry {
   label: string;
   /** Role within the deep-research pipeline. */
   kind: "llm" | "reranker";
-  /** Huggingface resolve/main URL (raw bytes). NOT the /blob/ web page. */
-  url: string;
+  /** Download URLs in fallback order. The first URL is tried first; on any
+   *  failure (network, 4xx, 5xx, mid-stream abort) the next is tried.
+   *  Upstream Huggingface is the canonical source and goes first; the lloyal
+   *  R2 mirror is the fallback for HF outages or rate-limited installs. */
+  urls: string[];
   /** Filename inside the cache dir — basename of the URL. */
   filename: string;
   /** Approximate size in bytes. Used as a fallback when a Content-Length
@@ -42,7 +51,10 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
     id: "qwen3.5-4b-q4",
     label: "Qwen3.5-4B Q4_K_M",
     kind: "llm",
-    url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+    urls: [
+      "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+      "https://models.lloyal.ai/Qwen3.5-4B-Q4_K_M.gguf",
+    ],
     filename: "Qwen3.5-4B-Q4_K_M.gguf",
     sizeBytes: 2_600_000_000,
     recommendedNCtx: 32768,
@@ -51,7 +63,10 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
     id: "qwen3-reranker-0.6b-q8",
     label: "Qwen3-Reranker 0.6B Q8_0",
     kind: "reranker",
-    url: "https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/resolve/main/qwen3-reranker-0.6b-q8_0.gguf",
+    urls: [
+      "https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/resolve/main/qwen3-reranker-0.6b-q8_0.gguf",
+      "https://models.lloyal.ai/qwen3-reranker-0.6b-q8_0.gguf",
+    ],
     filename: "qwen3-reranker-0.6b-q8_0.gguf",
     sizeBytes: 630_000_000,
   },
@@ -106,12 +121,14 @@ export function resolveModelPath(
 // ── Download ─────────────────────────────────────────────────────
 
 /** Stream a catalog entry into the cache atomically. No-op if the file
- *  already exists. `onProgress` is called throttled (~5 Hz) during the
- *  transfer — callers pipe it into Ink events (TTY) or stderr one-liners
- *  (non-TTY). Returns the final dest path. */
+ *  already exists. Walks `entry.urls` in fallback order; the first URL that
+ *  yields a complete download wins. `onProgress` is called throttled (~5 Hz)
+ *  during the transfer — callers pipe it into Ink events (TTY) or stderr
+ *  one-liners (non-TTY). Returns the final dest path. Throws once every URL
+ *  has been tried, with one error line per URL. */
 export async function downloadIfMissing(
   entry: ModelCatalogEntry,
-  opts: { onProgress?: (got: number, total: number) => void } = {},
+  opts: { onProgress?: (got: number, total: number, url: string) => void } = {},
 ): Promise<string> {
   const dest = path.join(cacheDir(), entry.filename);
   if (fs.existsSync(dest)) return dest;
@@ -120,11 +137,35 @@ export async function downloadIfMissing(
   const tmp = dest + ".partial";
   try { fs.unlinkSync(tmp); } catch { /* stale, or first run */ }
 
-  const res = await fetch(entry.url, { redirect: "follow" });
-  if (!res.ok || !res.body) {
-    throw new Error(`HTTP ${res.status} ${res.statusText} fetching ${entry.url}`);
+  const errors: string[] = [];
+  for (const url of entry.urls) {
+    try {
+      return await streamUrlToDest(url, tmp, dest, entry.sizeBytes, opts);
+    } catch (err) {
+      errors.push(`  ${url}: ${(err as Error).message}`);
+      try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+    }
   }
-  const total = Number(res.headers.get("content-length") ?? entry.sizeBytes);
+  throw new Error(
+    `Failed to download ${entry.label} from any source:\n${errors.join("\n")}`,
+  );
+}
+
+async function streamUrlToDest(
+  url: string,
+  tmp: string,
+  dest: string,
+  fallbackSize: number,
+  opts: { onProgress?: (got: number, total: number, url: string) => void },
+): Promise<string> {
+  const res = await fetch(url, {
+    redirect: "follow",
+    headers: { "User-Agent": USER_AGENT },
+  });
+  if (!res.ok || !res.body) {
+    throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  }
+  const total = Number(res.headers.get("content-length") ?? fallbackSize);
 
   const out = fs.createWriteStream(tmp);
   let got = 0;
@@ -135,7 +176,7 @@ export async function downloadIfMissing(
     const now = Date.now();
     if (!final && now - lastEmit < 200) return;
     lastEmit = now;
-    opts.onProgress(got, total);
+    opts.onProgress(got, total, url);
   };
 
   try {
@@ -146,7 +187,6 @@ export async function downloadIfMissing(
     }
   } catch (err) {
     out.destroy();
-    try { fs.unlinkSync(tmp); } catch { /* best effort */ }
     throw err;
   }
 

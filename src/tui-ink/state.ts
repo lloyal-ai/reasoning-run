@@ -25,7 +25,8 @@ export type UiPhase =
   | 'plan_review'    // plan dialog visible, accept/edit/change-mode
   | 'clarifying'     // planner asked questions; composer takes the answer
   | 'research'       // column layout streaming
-  | 'done';          // research complete, results visible, composer below
+  | 'done'           // research complete, results visible, composer below
+  | 'boot_error';    // download/load failed; recovery via /model or /quit
 
 /** User-facing reasoning mode. 'deep' == chain-shaped orchestration
  *  (sequential tasks that build on each other); 'flat' == parallel-shaped
@@ -97,17 +98,34 @@ export interface AgentRuntime {
 }
 
 /** Append-only items rendered via Ink's `<Static>` so they get written to
- *  terminal scrollback once and never re-render. The synth answer body is
- *  pushed here at `synthesize:done` so the dynamic tree stays small —
- *  otherwise the body grows past viewport and Ink loses cursor anchoring
- *  when the post-`complete` chrome remounts (the disappearance bug). */
-export interface ScrollbackItem {
-  /** Stable unique key for React reconciliation. */
-  key: string;
-  kind: 'synth';
-  /** Streamed body content (markdown). */
-  body: string;
-}
+ *  terminal scrollback once and never re-render.
+ *
+ *  Two kinds:
+ *    - 'synth' — synth answer body (markdown), pushed at `synthesize:done`.
+ *    - 'agent' — a finished research agent's panel snapshot, pushed at
+ *      `agent:report`. The agent is also dropped from `researchAgentIds`
+ *      at that point so Narrative stops rendering it live.
+ *
+ *  Why this matters: anything in the dynamic tree that isn't actively
+ *  streaming triggers Ink's clearTerminal-on-overflow when the dynamic
+ *  tree exceeds viewport, wiping scrollback. Pushing completed content
+ *  to Static keeps the dynamic tree small and preserves scrollback. */
+export type ScrollbackItem =
+  | {
+      key: string;
+      kind: 'synth';
+      /** Streamed body content (markdown). */
+      body: string;
+    }
+  | {
+      key: string;
+      kind: 'agent';
+      /** Snapshot of the agent's runtime state at agent:report time.
+       *  Reducer state is immutable so this reference is stable —
+       *  subsequent reductions create new AgentRuntime objects rather
+       *  than mutating this one. */
+      agent: AgentRuntime;
+    };
 
 export interface Pressure {
   pct: number;
@@ -150,6 +168,12 @@ export interface DownloadStatus {
   got: number;
   total: number;
   done: boolean;
+  /** True once `download:start` has fired for this entry. Distinguishes
+   *  queued (planned but not begun) from active (bytes flowing). */
+  started: boolean;
+  /** Most recent URL the streamer is pulling from. Updates if a fallback
+   *  kicks in (e.g., HF fails → R2 takes over mid-download). */
+  url?: string;
 }
 
 export interface Toast {
@@ -230,6 +254,16 @@ export interface AppState {
   /** Append-only Static items (synth bodies). Persisted across queries so
    *  prior answers stay in scrollback after a follow-up query starts. */
   scrollback: ScrollbackItem[];
+  /** Corpus indexing summary — displayed in the Composer's Corpus chip
+   *  so the user can see how many files are in scope. Null until the
+   *  first `corpus:indexed` event lands; refreshes on path changes. */
+  corpusStatus: { fileCount: number; chunkCount: number } | null;
+  /** Set when boot fails (model/reranker download or load error). Renders
+   *  the error block + recovery prompt; the user can `/model <path>` or
+   *  `/reranker <path>` to retry with a local .gguf, or `/quit`. `kind`
+   *  determines which CTA is highlighted. Null once boot has progressed
+   *  past the failure or the recovery succeeded. */
+  bootError: { kind: 'llm' | 'reranker'; message: string } | null;
 }
 
 export const initialState: AppState = {
@@ -265,4 +299,6 @@ export const initialState: AppState = {
   loadingLabel: null,
   nextToastId: 0,
   scrollback: [],
+  corpusStatus: null,
+  bootError: null,
 };

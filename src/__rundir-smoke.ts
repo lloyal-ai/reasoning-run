@@ -24,11 +24,21 @@ function check(label: string, fn: () => void): void {
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rundir-smoke-'));
 
+/** Each test gets its own outputDir subdir so RunDirSink.start's
+ *  millisecond-resolution timestamps can't collide across rapid-fire test
+ *  invocations and reuse a directory from a prior test. */
+let testIdx = 0;
+function freshOutputDir(): string {
+  const dir = path.join(tmpRoot, `t${testIdx++}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 // ── Helper: drive a stream and return the run-dir ──────────────────
 function drive(events: WorkflowEvent[]): string {
   const sink = new RunDirSink();
   const dir = sink.start({
-    outputDir: tmpRoot,
+    outputDir: freshOutputDir(),
     query: 'How do voice agents hit sub-800ms latency on-device?',
     mode: 'flat',
   });
@@ -93,7 +103,7 @@ check('flat-mode: writes report.md + annexure-{1,2,3}.md', () => {
 // ── deep-mode (chain) — task descriptions come from spine:task ─────
 check('deep-mode: spine:task captures descriptions for annexures', () => {
   const sink = new RunDirSink();
-  const dir = sink.start({ outputDir: tmpRoot, query: 'Deep query', mode: 'deep' });
+  const dir = sink.start({ outputDir: freshOutputDir(),query: 'Deep query', mode: 'deep' });
   const events: WorkflowEvent[] = [
     { type: 'research:start', agentCount: 2, mode: 'deep' },
     { type: 'spine:task', taskIndex: 0, taskCount: 2, description: 'Background research' },
@@ -125,7 +135,7 @@ check('deep-mode: spine:task captures descriptions for annexures', () => {
 // ── synth agent (post-research:done) does NOT produce an annexure ──
 check('synth agent:spawn (after research:done) is not annexed', () => {
   const sink = new RunDirSink();
-  const dir = sink.start({ outputDir: tmpRoot, query: 'Synth-only query', mode: 'flat' });
+  const dir = sink.start({ outputDir: freshOutputDir(),query: 'Synth-only query', mode: 'flat' });
   const events: WorkflowEvent[] = [
     { type: 'research:start', agentCount: 1, mode: 'flat' },
     { type: 'fanout:tasks', tasks: [{ description: 'Sole task' }] as never },
@@ -157,11 +167,12 @@ check('synth agent:spawn (after research:done) is not annexed', () => {
 // ── two queries → two run-dirs (no clobber) ────────────────────────
 check('two consecutive starts → two distinct run-dirs', () => {
   const sink = new RunDirSink();
-  const d1 = sink.start({ outputDir: tmpRoot, query: 'Q1', mode: 'flat' });
+  const sharedDir = freshOutputDir();
+  const d1 = sink.start({ outputDir: sharedDir, query: 'Q1', mode: 'flat' });
   // Force a 1-second gap so the ISO timestamps differ.
   const t = Date.now() + 1100;
   while (Date.now() < t) { /* spin */ }
-  const d2 = sink.start({ outputDir: tmpRoot, query: 'Q2', mode: 'flat' });
+  const d2 = sink.start({ outputDir: sharedDir, query: 'Q2', mode: 'flat' });
   assert.notEqual(d1, d2);
   assert.ok(fs.existsSync(d1));
   assert.ok(fs.existsSync(d2));
@@ -170,7 +181,7 @@ check('two consecutive starts → two distinct run-dirs', () => {
 // ── ui:error mid-run resets without writing report.md ──────────────
 check('ui:error mid-run does not write report.md', () => {
   const sink = new RunDirSink();
-  const dir = sink.start({ outputDir: tmpRoot, query: 'Failing', mode: 'flat' });
+  const dir = sink.start({ outputDir: freshOutputDir(),query: 'Failing', mode: 'flat' });
   sink.handle({ type: 'research:start', agentCount: 1, mode: 'flat' });
   sink.handle({
     type: 'agent:spawn',

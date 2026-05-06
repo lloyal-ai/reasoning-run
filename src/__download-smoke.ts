@@ -36,16 +36,41 @@ check('catalog has at least one llm and one reranker', () => {
   assert.equal(DEFAULT_RERANKER.kind, 'reranker');
 });
 
-check('catalog URLs are HF resolve/main (raw bytes), not blob/', () => {
+check('catalog: every entry has at least one URL', () => {
   for (const entry of MODEL_CATALOG) {
     assert.ok(
-      entry.url.includes('/resolve/main/'),
-      `${entry.id}: URL must use /resolve/main/ (got ${entry.url})`,
+      Array.isArray(entry.urls) && entry.urls.length >= 1,
+      `${entry.id}: urls[] must contain at least one entry`,
     );
-    assert.ok(
-      !entry.url.includes('/blob/'),
-      `${entry.id}: URL must not use /blob/ (got ${entry.url})`,
-    );
+  }
+});
+
+check('catalog: HF URLs use /resolve/main/ (raw bytes), not /blob/', () => {
+  for (const entry of MODEL_CATALOG) {
+    for (const url of entry.urls) {
+      if (!url.includes('huggingface.co')) continue;
+      assert.ok(
+        url.includes('/resolve/main/'),
+        `${entry.id}: HF URL must use /resolve/main/ (got ${url})`,
+      );
+      assert.ok(
+        !url.includes('/blob/'),
+        `${entry.id}: HF URL must not use /blob/ (got ${url})`,
+      );
+    }
+  }
+});
+
+check('catalog: Huggingface upstream is listed before lloyal mirror', () => {
+  for (const entry of MODEL_CATALOG) {
+    const lloyalIdx = entry.urls.findIndex((u) => u.includes('lloyal.ai'));
+    const hfIdx = entry.urls.findIndex((u) => u.includes('huggingface.co'));
+    if (lloyalIdx !== -1 && hfIdx !== -1) {
+      assert.ok(
+        hfIdx < lloyalIdx,
+        `${entry.id}: huggingface.co upstream must precede lloyal.ai mirror`,
+      );
+    }
   }
 });
 

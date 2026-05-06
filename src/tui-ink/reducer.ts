@@ -478,21 +478,44 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
 
     // ── Boot phases ────────────────────────────────────────────
 
-    case 'download:start':
+    case 'download:plan':
+      // Plan is the ONLY event that grows state.downloads. Replaces the
+      // array entirely with one entry per planned download. start /
+      // progress / complete only mutate existing entries — they never
+      // append. This makes duplicate-by-id structurally impossible.
       return {
         ...state,
         uiPhase: 'downloading',
-        downloads: [
-          ...state.downloads,
-          { id: ev.id, label: ev.label, got: 0, total: ev.sizeBytes, done: false },
-        ],
+        downloads: ev.entries.map((e) => ({
+          id: e.id,
+          label: e.label,
+          got: 0,
+          total: e.sizeBytes,
+          done: false,
+          started: false,
+        })),
+      };
+
+    case 'download:start':
+      // Mark the planned entry started. If no plan precedes (legacy /
+      // unexpected path), drop the event rather than risk a duplicate
+      // entry. uiPhase still flips to 'downloading' so the spinner
+      // renders.
+      return {
+        ...state,
+        uiPhase: 'downloading',
+        downloads: state.downloads.map((d) =>
+          d.id === ev.id ? { ...d, started: true } : d,
+        ),
       };
 
     case 'download:progress':
       return {
         ...state,
         downloads: state.downloads.map((d) =>
-          d.id === ev.id ? { ...d, got: ev.got, total: ev.total } : d,
+          d.id === ev.id
+            ? { ...d, started: true, got: ev.got, total: ev.total, url: ev.url ?? d.url }
+            : d,
         ),
       };
 
@@ -512,6 +535,19 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
 
     case 'weights:done':
       return { ...state, loadingLabel: null };
+
+    case 'corpus:indexed':
+      return {
+        ...state,
+        corpusStatus: { fileCount: ev.fileCount, chunkCount: ev.chunkCount },
+      };
+
+    case 'boot:error':
+      return {
+        ...state,
+        uiPhase: 'boot_error',
+        bootError: { kind: ev.kind, message: ev.message },
+      };
 
     // ── Agent events ───────────────────────────────────────────
 
@@ -736,7 +772,35 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
           },
         ),
       );
-      return { ...next, nextTimelineId: working.nextTimelineId + 1 };
+
+      // Push the finished panel into scrollback as a Static item, and drop
+      // it from researchAgentIds so Narrative stops rendering it live. This
+      // keeps the dynamic tree small (only currently-streaming agents stay
+      // in Narrative), avoiding the clearTerminal-on-overflow scrollback
+      // wipe at later phase transitions. The frozen panel survives in
+      // terminal scrollback for the rest of the session.
+      const finalAgent = next.agents.get(ev.agentId);
+      const isResearch = next.researchAgentIds.includes(ev.agentId);
+      const scrollback = isResearch && finalAgent
+        ? [
+            ...next.scrollback,
+            {
+              key: `agent-${ev.agentId}-${next.scrollback.length}`,
+              kind: 'agent' as const,
+              agent: finalAgent,
+            },
+          ]
+        : next.scrollback;
+      const researchAgentIds = isResearch
+        ? next.researchAgentIds.filter((id) => id !== ev.agentId)
+        : next.researchAgentIds;
+
+      return {
+        ...next,
+        nextTimelineId: working.nextTimelineId + 1,
+        scrollback,
+        researchAgentIds,
+      };
     }
 
     case 'agent:done': {

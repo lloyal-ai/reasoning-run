@@ -53,10 +53,11 @@ import {
   createReranker,
   WebSource,
   CorpusSource,
-  loadResources,
   chunkResources,
+  resolveCorpusInput,
 } from "@lloyal-labs/rig/node";
 import type { Resource } from "@lloyal-labs/rig/node";
+import ignoreFactory from "ignore";
 import {
   handleQuery,
   runPlanner,
@@ -69,11 +70,14 @@ import {
   type ModelCatalogEntry,
 } from "./models";
 import { RunDirSink } from "./run-dir";
+import { resolvePath } from "./tui-ink/path-utils";
 
 // ── CLI args ─────────────────────────────────────────────────────
 
-// Default config path colocates with the example, not the repo root.
-const DEFAULT_CONFIG_PATH = path.join(__dirname, "harness.json");
+// Default config path: harness.json in the user's working directory.
+// (Previous: colocated with the script via __dirname, which doesn't exist
+// in the published ESM bundle and put config in the install dir anyway.)
+const DEFAULT_CONFIG_PATH = path.join(process.cwd(), "harness.json");
 
 const { values: flags, positionals } = parseArgs({
   args: process.argv.slice(2),
@@ -167,31 +171,121 @@ const corpusCache = new Map<
   { resources: Resource[]; chunks: Chunk[] }
 >();
 
-function getOrLoadCorpus(corpusPath: string): {
+/** Effection-aware corpus indexer.
+ *
+ *  Walks the user's input (directory or glob pattern), reads each `.md`/
+ *  `.mdx` file, and builds chunks. Emits `weights:label` events with the
+ *  current filename + (i/N) progress per file. Yields to the event loop
+ *  via setImmediate between files so Ink can re-render the inline-
+ *  updating status line.
+ *
+ *  Input semantics (delegated to rig's `resolveCorpusInput`):
+ *    - `/path/to/dir` → recursive `**\/*.{md,mdx}`, filtered by .gitignore
+ *    - `/path/to/dir/*.md` → top-level only (user-supplied pattern)
+ *    - `/path/to/dir/**\/*.md` → recursive (user-supplied pattern)
+ *    - Other extensions → rig throws
+ *
+ *  Honors `.gitignore` at the cwd root if present. Cached by input string
+ *  so subsequent calls return cached entries without re-walking.
+ *
+ *  Without the per-file yields the entire walk runs in one synchronous
+ *  burst, all the label events queue but Ink only renders the LAST one
+ *  — defeating the "show me what's happening" purpose. */
+function* indexCorpus(
+  corpusInput: string,
+  channel: EventBus<WorkflowEvent>,
+): Operation<{
   resources: Resource[];
   chunks: Chunk[];
-} {
-  const existing = corpusCache.get(corpusPath);
+}> {
+  const existing = corpusCache.get(corpusInput);
   if (existing) return existing;
-  const resources = loadResources(corpusPath);
+
+  const { cwd, pattern } = resolveCorpusInput(corpusInput);
+  // Plain directory → recursive walk (filtered by .gitignore below).
+  // Glob pattern → use as-is.
+  const effectivePattern = pattern ?? "**/*.{md,mdx}";
+
+  // Honor .gitignore at the cwd root — same semantics as rig's
+  // loadResources. The user's existing .gitignore is the right place
+  // to declare what should never be in scope.
+  const gitignorePath = path.join(cwd, ".gitignore");
+  const ig = fs.existsSync(gitignorePath)
+    ? ignoreFactory().add(fs.readFileSync(gitignorePath, "utf8"))
+    : null;
+
+  const all = fs.globSync(effectivePattern, { cwd }) as string[];
+  const files = (ig ? all.filter((f) => !ig.ignores(f)) : all).sort();
+
+  if (files.length === 0) {
+    process.stderr.write(
+      `Error: no .md(x) files matched: ${cwd}/${effectivePattern}\n`,
+    );
+    process.exit(1);
+  }
+
+  channel.send({
+    type: 'weights:label',
+    label: `Indexing corpus (${files.length} files)…`,
+  });
+
+  // Read + collect resources, yielding between files so Ink renders the
+  // updating label.
+  const resources: Resource[] = [];
+  for (let i = 0; i < files.length; i++) {
+    const rel = files[i];
+    channel.send({
+      type: 'weights:label',
+      label: `Indexing: ${rel} (${i + 1}/${files.length})`,
+    });
+    yield* call(
+      () =>
+        new Promise<void>((resolve) => {
+          // setImmediate yields to the event loop → Ink re-renders the
+          // label that the previous send queued. Tiny pause per file but
+          // gives the user visible per-file progress.
+          setImmediate(() => {
+            try {
+              resources.push({
+                name: rel,
+                content: fs.readFileSync(path.join(cwd, rel), 'utf8'),
+              });
+            } catch {
+              /* skip unreadable file */
+            }
+            resolve();
+          });
+        }),
+    );
+  }
+
+  // Chunk (parseMarkdown WASM call per file). Same yielding pattern.
+  channel.send({ type: 'weights:label', label: 'Chunking corpus…' });
+  yield* call(
+    () => new Promise<void>((resolve) => setImmediate(resolve)),
+  );
   const chunks = chunkResources(resources);
+
   const entry = { resources, chunks };
-  corpusCache.set(corpusPath, entry);
+  corpusCache.set(corpusInput, entry);
   return entry;
 }
 
-/** Build a fresh Source[] from the current config. Cheap: WebSource wraps
- *  the Tavily client; CorpusSource wraps cached resources+chunks. */
+/** Build a fresh Source[] from the current config. Synchronous —
+ *  assumes the corpus is already indexed (call ensureCorpusIndexed
+ *  before submit-query paths). WebSource wraps the Tavily client. */
 function buildSources(config: Config): Source<SourceContext, Chunk>[] {
   const sources: Source<SourceContext, Chunk>[] = [];
   if (config.sources.corpusPath) {
-    const { resources, chunks } = getOrLoadCorpus(config.sources.corpusPath);
-    sources.push(
-      new CorpusSource(resources, chunks, {
-        grep: { maxResults: 50, lineMaxChars: 200 },
-        readFile: { defaultMaxLines: 100 },
-      }),
-    );
+    const cached = corpusCache.get(config.sources.corpusPath);
+    if (cached) {
+      sources.push(
+        new CorpusSource(cached.resources, cached.chunks, {
+          grep: { maxResults: 50, lineMaxChars: 200 },
+          readFile: { defaultMaxLines: 100 },
+        }),
+      );
+    }
   }
   if (config.sources.tavilyKey) {
     // TavilyProvider takes the key as a positional string argument.
@@ -273,6 +367,21 @@ main(function* () {
   const uiChannel: EventBus<WorkflowEvent> = createBus<WorkflowEvent>();
   const commands = createSignal<Command, void>();
 
+  // Compute initial download plan synchronously so it can be bootstrapped
+  // alongside config:loaded. Reasoning: if we send download:plan via the bus
+  // AFTER mount, the first paint shows the empty 'boot' tree and a later
+  // frame shows the populated 'downloading' tree — Ink's clearTerminal-on-
+  // shape-change leaks the pre-transition frame to scrollback (the phantom-
+  // entry bug). Bootstrapping the plan means frame 1 is already in the
+  // final shape; no transition for Ink to leak.
+  const initialPlanEntries = [llmResolved, rerankerResolved]
+    .filter((r) => r.entry !== null && !fs.existsSync(r.path))
+    .map((r) => ({
+      id: r.entry!.id,
+      label: r.entry!.label,
+      sizeBytes: r.entry!.sizeBytes,
+    }));
+
   let inkInstance: { unmount: () => void } | null = null;
   if (useInk) {
     const mod = yield* call(
@@ -281,7 +390,8 @@ main(function* () {
           typeof import("./tui-ink/render.js")
         >,
     );
-    // Seed with config:loaded so uiPhase moves out of 'boot' on first paint.
+    // Seed with config:loaded + (optionally) download:plan so first paint
+    // already reflects the final boot-phase tree shape.
     const bootstrap: WorkflowEvent[] = [
       {
         type: "config:loaded",
@@ -290,6 +400,9 @@ main(function* () {
         path: loaded.path,
       },
     ];
+    if (initialPlanEntries.length > 0) {
+      bootstrap.push({ type: "download:plan", entries: initialPlanEntries });
+    }
     inkInstance = mod.render(uiChannel, (cmd) => commands.send(cmd), bootstrap);
     yield* ensure(() => { inkInstance?.unmount(); });
   } else {
@@ -300,10 +413,11 @@ main(function* () {
     });
   }
 
-  // ── Downloads (if needed) ──────────────────────────────────
-  const needsDownload =
-    (llmResolved.entry !== null && !fs.existsSync(llmResolved.path)) ||
-    (rerankerResolved.entry !== null && !fs.existsSync(rerankerResolved.path));
+  // ── Downloads + weights load (with /model recovery loop) ──────
+  // Retryable: any failure (HF 404, network, invalid local file, etc.)
+  // emits boot:error → BootStatus renders the error in Ink (NOT stderr)
+  // → user types /model <path> or /quit → loop retries with the new path
+  // or exits cleanly. Avoids the stderr-during-render crash UX.
 
   function* ensureFile(
     r: { path: string; entry: ModelCatalogEntry | null },
@@ -311,9 +425,8 @@ main(function* () {
     if (fs.existsSync(r.path)) return r.path;
     if (!r.entry) {
       throw new Error(
-        `Model not found: ${r.path}\n\n` +
-          `  Pass --model <path> (or --reranker <path>) to use a local file,\n` +
-          `  or leave the value unset to auto-download the default.\n`,
+        `Model not found: ${r.path}. ` +
+          `Pass --model <path> or use /model <path> to set a local .gguf file.`,
       );
     }
     const entry = r.entry;
@@ -325,58 +438,159 @@ main(function* () {
     });
     yield* call(() =>
       downloadIfMissing(entry, {
-        onProgress: (got, total) => {
+        onProgress: (got, total, url) => {
           uiChannel.send({
             type: "download:progress",
             id: entry.id,
             got,
             total,
+            url,
           });
         },
       }),
     );
     uiChannel.send({ type: "download:complete", id: entry.id });
     return r.path;
-  };
-
-  if (needsDownload) {
-    yield* ensureFile(llmResolved);
-    yield* ensureFile(rerankerResolved);
-  } else {
-    yield* ensureFile(llmResolved);
-    yield* ensureFile(rerankerResolved);
   }
 
-  // ── Loading weights ───────────────────────────────────────
-  uiChannel.send({ type: "weights:start", label: `Loading ${modelName}…` });
-  let ctx: SessionContext;
-  try {
-    ctx = yield* call(() =>
-      createContext({
-        modelPath,
-        nCtx,
-        nSeqMax: 64,
-        typeK: "q4_0",
-        typeV: "q4_0",
-      }),
-    );
-  } catch (err) {
-    uiChannel.send({ type: "weights:done" });
-    throw err;
+  /** Inspect the resolved set, emit `download:plan` for any entries that
+   *  will need fetching. Sent once before the ensureFile loop so the UI
+   *  can render a stable two-line tree from the moment any download
+   *  begins (instead of growing mid-stream when reranker starts). */
+  function planDownloads(
+    rs: ({ path: string; entry: ModelCatalogEntry | null })[],
+  ): void {
+    const entries = rs
+      .filter((r) => r.entry !== null && !fs.existsSync(r.path))
+      .map((r) => ({
+        id: r.entry!.id,
+        label: r.entry!.label,
+        sizeBytes: r.entry!.sizeBytes,
+      }));
+    if (entries.length > 0) {
+      uiChannel.send({ type: "download:plan", entries });
+    }
   }
 
-  uiChannel.send({ type: "weights:label", label: `Loading ${rerankName}…` });
-  let reranker: Reranker;
-  try {
-    reranker = yield* call(() =>
-      createReranker(rerankModelPath, { nSeqMax: 8, nCtx: 16384 }),
-    );
-  } catch (err) {
-    uiChannel.send({ type: "weights:done" });
-    throw err;
+  /** Drain `commands` until we see one of the recovery commands. Other
+   *  commands during boot recovery are ignored — the user has only three
+   *  meaningful actions at this point. */
+  function* awaitBootRecovery(): Operation<
+    | { type: "set_model_path"; path: string }
+    | { type: "set_reranker_path"; path: string }
+    | { type: "quit" }
+  > {
+    for (const cmd of yield* each(commands)) {
+      if (
+        cmd.type === "quit" ||
+        cmd.type === "set_model_path" ||
+        cmd.type === "set_reranker_path"
+      ) {
+        yield* each.next();
+        return cmd;
+      }
+      yield* each.next();
+    }
+    return { type: "quit" };
+  }
+
+  let llmResolvedNow = llmResolved;
+  let modelPathNow = modelPath;
+  let modelNameNow = modelName;
+  let rerankerResolvedNow = rerankerResolved;
+  let rerankModelPathNow = rerankModelPath;
+  let rerankNameNow = rerankName;
+
+  let ctx: SessionContext | null = null;
+  let reranker: Reranker | null = null;
+
+  // First iteration uses the bootstrapped plan (no bus emit needed).
+  // Subsequent iterations (after /model or /reranker recovery) re-plan via
+  // the bus since paths may have changed.
+  let firstBootIteration = true;
+
+  while (ctx === null || reranker === null) {
+    // `lastFailedKind` is set BEFORE each step so the catch can attribute
+    // the failure to the right component without unwinding through an
+    // intermediate try/catch per step.
+    let lastFailedKind: "llm" | "reranker" = "llm";
+    try {
+      if (!firstBootIteration) {
+        planDownloads([llmResolvedNow, rerankerResolvedNow]);
+      }
+      firstBootIteration = false;
+
+      lastFailedKind = "llm";
+      yield* ensureFile(llmResolvedNow);
+
+      lastFailedKind = "reranker";
+      yield* ensureFile(rerankerResolvedNow);
+
+      lastFailedKind = "llm";
+      uiChannel.send({ type: "weights:start", label: `Loading ${modelNameNow}…` });
+      ctx = yield* call(() =>
+        createContext({
+          modelPath: modelPathNow,
+          nCtx,
+          nSeqMax: 64,
+          typeK: "q4_0",
+          typeV: "q4_0",
+        }),
+      );
+
+      lastFailedKind = "reranker";
+      uiChannel.send({ type: "weights:label", label: `Loading ${rerankNameNow}…` });
+      reranker = yield* call(() =>
+        createReranker(rerankModelPathNow, { nSeqMax: 8, nCtx: 16384 }),
+      );
+    } catch (err) {
+      // Tear down anything that loaded. createContext succeeding then
+      // createReranker failing leaves ctx alive — must dispose so the
+      // retry doesn't double-load.
+      if (ctx) {
+        try { ctx.dispose?.(); } catch { /* best-effort */ }
+        ctx = null;
+      }
+      reranker = null;
+      uiChannel.send({
+        type: "boot:error",
+        kind: lastFailedKind,
+        message: errorMessage(err),
+      });
+      const cmd = yield* awaitBootRecovery();
+      if (cmd.type === "quit") {
+        inkInstance?.unmount();
+        process.exit(0);
+      }
+      if (cmd.type === "set_model_path") {
+        saveConfig({ model: { path: cmd.path } }, configPath);
+        llmResolvedNow = resolveModelPath(cmd.path, "llm");
+        modelPathNow = llmResolvedNow.path;
+        modelNameNow =
+          llmResolvedNow.entry?.label ?? path.basename(modelPathNow);
+      } else {
+        // set_reranker_path
+        saveConfig({ model: { reranker: cmd.path } }, configPath);
+        rerankerResolvedNow = resolveModelPath(cmd.path, "reranker");
+        rerankModelPathNow = rerankerResolvedNow.path;
+        rerankNameNow =
+          rerankerResolvedNow.entry?.label ?? path.basename(rerankModelPathNow);
+      }
+      const reloaded = loadConfig(configPath, {
+        modelPath: cmd.type === "set_model_path" ? cmd.path : cliModelPath,
+        reranker:
+          cmd.type === "set_reranker_path" ? cmd.path : flags.reranker,
+        corpusPath: flags.corpus,
+        reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+        outputDir: cliOutputDir,
+        nCtx: nCtxCli,
+      });
+      liveConfig = reloaded.config;
+      liveOrigin = reloaded.origin;
+    }
   }
   yield* ensure(() => {
-    reranker.dispose();
+    reranker!.dispose();
   });
   uiChannel.send({ type: "weights:done" });
 
@@ -384,8 +598,8 @@ main(function* () {
   // Session-scoped trace: one trace.jsonl per process invocation, captures
   // every query (including warm follow-ups) in one file. Always-on; the
   // file is created upfront under the user's output-dir.
-  const sessionOutputDir = path.resolve(
-    liveConfig.sources.outputDir ?? process.cwd(),
+  const sessionOutputDir = resolvePath(
+    liveConfig.sources.outputDir || process.cwd(),
   );
   fs.mkdirSync(sessionOutputDir, { recursive: true });
   const sessionTraceTs = new Date()
@@ -421,6 +635,23 @@ main(function* () {
       yield* each.next();
     }
   });
+
+  // Eager corpus indexing — runs during the 'loading' phase so the user
+  // sees per-file progress in the boot status line. Avoids a silent
+  // 30-second-to-minutes pause on the first query when the corpus has
+  // hundreds of files (recursive **/*.{md,mdx} walk).
+  if (liveConfig.sources.corpusPath) {
+    const indexed = yield* indexCorpus(
+      liveConfig.sources.corpusPath,
+      uiChannel,
+    );
+    uiChannel.send({
+      type: "corpus:indexed",
+      corpusPath: liveConfig.sources.corpusPath,
+      fileCount: indexed.resources.length,
+      chunkCount: indexed.chunks.length,
+    });
+  }
 
   // Transition reducer out of 'loading' into 'composer'. (config:loaded was
   // already in the bootstrap; this nudges uiPhase now that boot is complete.)
@@ -523,8 +754,12 @@ main(function* () {
           skipped: saved.skipped,
         });
       } else if (cmd.type === "set_output_dir") {
+        // Resolve at the boundary: ~ expansion + relative→absolute happen
+        // here so the persisted form in harness.json is always absolute.
+        // Empty input clears the field (saveConfig drops empty values).
+        const resolved = cmd.path ? resolvePath(cmd.path) : "";
         const saved = saveConfig(
-          { sources: { outputDir: cmd.path } },
+          { sources: { outputDir: resolved } },
           configPath,
         );
         const reloaded = loadConfig(configPath, {
@@ -545,8 +780,9 @@ main(function* () {
           skipped: saved.skipped,
         });
       } else if (cmd.type === "set_corpus_path") {
+        const resolved = cmd.path ? resolvePath(cmd.path) : "";
         const saved = saveConfig(
-          { sources: { corpusPath: cmd.path } },
+          { sources: { corpusPath: resolved } },
           configPath,
         );
         const reloaded = loadConfig(configPath, {
@@ -566,6 +802,27 @@ main(function* () {
           gitignored: saved.gitignored,
           skipped: saved.skipped,
         });
+        // Index the new corpus path so the next query doesn't pause silently.
+        // Re-uses the same loading-status pattern boot uses; user sees the
+        // indexing progress before the composer regains focus.
+        if (liveConfig.sources.corpusPath) {
+          uiChannel.send({
+            type: "weights:start",
+            label: "Indexing corpus…",
+          });
+          const indexed = yield* indexCorpus(
+            liveConfig.sources.corpusPath,
+            uiChannel,
+          );
+          uiChannel.send({
+            type: "corpus:indexed",
+            corpusPath: liveConfig.sources.corpusPath,
+            fileCount: indexed.resources.length,
+            chunkCount: indexed.chunks.length,
+          });
+          uiChannel.send({ type: "weights:done" });
+          yield* events.send({ type: "ui:composer" });
+        }
       } else if (cmd.type === "submit_query") {
         const wallStartMs = performance.now();
         const sources = buildSources(liveConfig);

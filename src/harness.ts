@@ -1,5 +1,3 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { call } from "effection";
 import type { Operation } from "effection";
 import type { Session, SessionContext } from "@lloyal-labs/sdk";
@@ -30,36 +28,48 @@ import type {
 } from "@lloyal-labs/rig";
 
 // ── Prompts ─────────────────────────────────────────────────────
+//
+// .eta files are inlined into the published bundle as string constants
+// via esbuild's text loader (see esbuild build script). At dev time tsx
+// honors the same `*.eta` -> string contract via the eta.d.ts ambient
+// declaration. No fs.readFileSync, no shipped prompts/ directory at
+// runtime.
 
-/** Load a task prompt file with `---` separator → `{ system, user }`. */
-function loadPrompt(name: string): { system: string; user: string } {
-  const raw = fs
-    .readFileSync(path.resolve(__dirname, `prompts/${name}.eta`), "utf8")
-    .trim();
-  const sep = raw.indexOf("\n---\n");
-  if (sep === -1) return { system: raw, user: "" };
-  return { system: raw.slice(0, sep).trim(), user: raw.slice(sep + 5).trim() };
+import PLAN_RAW from "./prompts/plan.eta";
+import PLAN_FLAT_RAW from "./prompts/plan-flat.eta";
+import FALLBACK_RAW from "./prompts/fallback.eta";
+import VERIFY_RAW from "./prompts/verify.eta";
+import EVAL_RAW from "./prompts/eval.eta";
+import RECOVERY_RAW from "./prompts/recovery.eta";
+import SYNTHESIZE_RAW from "./prompts/synthesize.eta";
+import SYNTHESIZE_FLAT_RAW from "./prompts/synthesize-flat.eta";
+import CORPUS_WORKER_RAW from "./prompts/corpus-worker.eta";
+import WEB_WORKER_RAW from "./prompts/web-worker.eta";
+import SKILL_CATALOG_RAW from "./prompts/skill-catalog.eta";
+
+/** Split a `system\n---\nuser` prompt source into its halves. Mirrors the
+ *  legacy `loadPrompt` shape so consumers don't change. */
+function parsePrompt(raw: string): { system: string; user: string } {
+  const trimmed = raw.trim();
+  const sep = trimmed.indexOf("\n---\n");
+  if (sep === -1) return { system: trimmed, user: "" };
+  return {
+    system: trimmed.slice(0, sep).trim(),
+    user: trimmed.slice(sep + 5).trim(),
+  };
 }
 
-/** Load a raw Eta template string for runtime rendering. */
-function loadTemplate(name: string): string {
-  return fs.readFileSync(
-    path.resolve(__dirname, `prompts/${name}.eta`),
-    "utf8",
-  );
-}
-
-const PLAN_DEEP = loadPrompt("plan");
-const PLAN_FLAT = loadPrompt("plan-flat");
-const FALLBACK = loadPrompt("fallback");
-const VERIFY = loadPrompt("verify");
-const EVAL = loadPrompt("eval");
-const RECOVERY = loadPrompt("recovery");
-const SYNTHESIZE_DEEP = loadPrompt("synthesize");
-const SYNTHESIZE_FLAT = loadPrompt("synthesize-flat");
-const CORPUS_WORKER_TEMPLATE = loadTemplate("corpus-worker");
-const WEB_WORKER_TEMPLATE = loadTemplate("web-worker");
-const SKILL_CATALOG_TEMPLATE = loadTemplate("skill-catalog");
+const PLAN_DEEP = parsePrompt(PLAN_RAW);
+const PLAN_FLAT = parsePrompt(PLAN_FLAT_RAW);
+const FALLBACK = parsePrompt(FALLBACK_RAW);
+const VERIFY = parsePrompt(VERIFY_RAW);
+const EVAL = parsePrompt(EVAL_RAW);
+const RECOVERY = parsePrompt(RECOVERY_RAW);
+const SYNTHESIZE_DEEP = parsePrompt(SYNTHESIZE_RAW);
+const SYNTHESIZE_FLAT = parsePrompt(SYNTHESIZE_FLAT_RAW);
+const CORPUS_WORKER_TEMPLATE = CORPUS_WORKER_RAW;
+const WEB_WORKER_TEMPLATE = WEB_WORKER_RAW;
+const SKILL_CATALOG_TEMPLATE = SKILL_CATALOG_RAW;
 
 function createResearchPolicy(): DefaultAgentPolicy {
   return new DefaultAgentPolicy({
@@ -70,6 +80,29 @@ function createResearchPolicy(): DefaultAgentPolicy {
     recovery: { prompt: RECOVERY },
     terminalTool: "report",
   });
+}
+
+/**
+ * Synth policy — synth's entire output IS the answer. There's no tool-call
+ * disambiguation to do (synth has no tools), so end-of-generation is the
+ * natural terminal signal. The streamed content becomes `agent.result`
+ * directly via the `free_text_report` action.
+ *
+ * `DefaultAgentPolicy._handleNoToolCall` gates `free_text_report` behind
+ * `agent.toolCallCount > 0` — a guard against research agents skipping
+ * evidence-gathering. Synth doesn't gather evidence; the prompt + parent
+ * KV ARE the evidence. Bypass that guard here.
+ */
+class SynthPolicy extends DefaultAgentPolicy {
+  override onProduced(
+    ...args: Parameters<DefaultAgentPolicy["onProduced"]>
+  ): ReturnType<DefaultAgentPolicy["onProduced"]> {
+    const [, parsed] = args;
+    if (!parsed.toolCalls[0] && parsed.content) {
+      return { type: "free_text_report", content: parsed.content };
+    }
+    return super.onProduced(...args);
+  }
 }
 
 // ── Types ───────────────────────────────────────────────────────
@@ -474,12 +507,15 @@ export function* runResearchBranch(
         agentCount: tasks.length,
       };
 
+      // Synth has no tools — its entire output IS the report. EOG is the
+      // terminal signal; SynthPolicy maps the streamed content directly to
+      // agent.result via the `free_text_report` path. No JSON-in-JSON
+      // tool-call wrapping → no escape failures, no truncated wrappers.
       const synth = yield* useAgent({
         systemPrompt: renderTemplate(synthPrompt.system, synthCtx),
         task: renderTemplate(synthPrompt.user, synthCtx),
-        tools: [reportTool],
         parent: queryRoot,
-        terminalTool: "report",
+        policy: new SynthPolicy(),
         maxTurns: opts.maxTurns,
       });
 

@@ -96,4 +96,4 @@ For Cmd+Backspace / Cmd+arrow to work, turn on "Natural Text Editing" in iTerm2,
 
 ## License
 
-Apache 2.0.
+Proprietary. © 2026 Lloyal AI. See `LICENSE` for terms.

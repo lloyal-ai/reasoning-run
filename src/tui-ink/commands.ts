@@ -19,4 +19,6 @@ export type Command =
   | { type: 'set_tavily_key'; key: string }
   | { type: 'set_corpus_path'; path: string }
   | { type: 'set_output_dir'; path: string }
+  | { type: 'set_model_path'; path: string }
+  | { type: 'set_reranker_path'; path: string }
   | { type: 'quit' };

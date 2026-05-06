@@ -1,4 +1,5 @@
 node_modules/
+dist/
 harness.json
 trace-*.jsonl
 *.tgz

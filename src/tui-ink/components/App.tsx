@@ -6,6 +6,7 @@ import { useEventStream } from '../hooks/useEventStream';
 import { CommandContext, type CommandDispatch } from '../hooks/useCommand';
 import type { EventBus } from '../event-bus';
 import { Header } from './Header';
+import { FrozenAgentPanel } from './FrozenAgentPanel';
 import { Narrative } from './Narrative';
 import { Synth } from './Synth';
 import { Verify } from './Verify';
@@ -43,23 +44,36 @@ export function App({ bus, dispatch, bootstrap }: AppProps): React.ReactElement 
   const showComposer =
     state.uiPhase === 'composer' ||
     state.uiPhase === 'done' ||
-    state.uiPhase === 'clarifying';
+    state.uiPhase === 'clarifying' ||
+    state.uiPhase === 'boot_error';
 
   return (
     <CommandContext.Provider value={dispatch}>
       <Static items={state.scrollback}>
-        {(item: ScrollbackItem) => (
-          <Box key={item.key} flexDirection="column" paddingX={2} marginBottom={1}>
-            <Text dimColor>───────────────────────────────────────</Text>
-            <Box paddingLeft={2} marginTop={1}>
-              <Text>{item.body}</Text>
+        {(item: ScrollbackItem) => {
+          if (item.kind === 'agent') {
+            return (
+              <Box key={item.key} paddingX={2}>
+                <FrozenAgentPanel agent={item.agent} />
+              </Box>
+            );
+          }
+          // kind === 'synth'
+          return (
+            <Box key={item.key} flexDirection="column" paddingX={2} marginBottom={1}>
+              <Text dimColor>───────────────────────────────────────</Text>
+              <Box paddingLeft={2} marginTop={1}>
+                <Text>{item.body}</Text>
+              </Box>
             </Box>
-          </Box>
-        )}
+          );
+        }}
       </Static>
       <Box flexDirection="column" paddingX={2} paddingY={1}>
         {showHeader && <Header query={state.query} warm={state.warm} />}
-        {(state.uiPhase === 'downloading' || state.uiPhase === 'loading') && (
+        {(state.uiPhase === 'downloading' ||
+          state.uiPhase === 'loading' ||
+          state.uiPhase === 'boot_error') && (
           <BootStatus state={state} />
         )}
         {state.uiPhase === 'planning' && <PlanningSpinner state={state} />}

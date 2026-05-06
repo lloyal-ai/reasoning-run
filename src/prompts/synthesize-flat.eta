@@ -104,7 +104,7 @@ HOW TO WRITE THE REPORT
 6. For each section, write fluent paragraphs that cite findings inline (direct quotes, specific numbers, named sources). Bulleted extracts only when items are genuinely parallel.
 7. End with ## Conclusion (restating thesis + prescription, + ### Limitations naming specific gaps) and ## Sources (deduplicated URL list with short descriptions).
 
-When the report is finished, call the report tool with the full markdown.
+OUTPUT FORMAT: emit the markdown report directly as your reply. Do NOT wrap it in any tool call, JSON envelope, or `<tool_call>...</tool_call>` tags. End naturally when the report is complete.
 ---
 Research question: "<%= it.query %>"
 

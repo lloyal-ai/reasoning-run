@@ -437,20 +437,52 @@ check('config:loaded seeds config without forcing a uiPhase transition', () => {
   assert.equal(s.configOrigin?.tavilyKey, 'file');
 });
 
-check('download:start → uiPhase=downloading + download entry added', () => {
+check('download:plan populates downloads + uiPhase=downloading', () => {
   const s = drive([
-    { type: 'download:start', id: 'llm', label: 'LLM', sizeBytes: 1000 } as WorkflowEvent,
+    {
+      type: 'download:plan',
+      entries: [{ id: 'llm', label: 'LLM', sizeBytes: 1000 }],
+    } as WorkflowEvent,
   ]);
   assert.equal(s.uiPhase, 'downloading');
   assert.equal(s.downloads.length, 1);
   assert.equal(s.downloads[0].id, 'llm');
+  assert.equal(s.downloads[0].started, false);
   assert.equal(s.downloads[0].done, false);
+});
+
+check('download:start marks the planned entry started (no append)', () => {
+  const s = drive([
+    {
+      type: 'download:plan',
+      entries: [{ id: 'llm', label: 'LLM', sizeBytes: 1000 }],
+    } as WorkflowEvent,
+    { type: 'download:start', id: 'llm', label: 'LLM', sizeBytes: 1000 } as WorkflowEvent,
+  ]);
+  assert.equal(s.downloads.length, 1);
+  assert.equal(s.downloads[0].started, true);
+});
+
+check('download:start without prior plan is dropped (no duplicate entry)', () => {
+  const s = drive([
+    { type: 'download:start', id: 'orphan', label: 'X', sizeBytes: 100 } as WorkflowEvent,
+  ]);
+  // uiPhase still flips, but no entry is appended — plan is the only path
+  // that grows downloads. Prevents id-collision bugs from accidental dupes.
+  assert.equal(s.uiPhase, 'downloading');
+  assert.equal(s.downloads.length, 0);
 });
 
 check('download:progress updates got/total for the matching id', () => {
   const s = drive([
+    {
+      type: 'download:plan',
+      entries: [
+        { id: 'a', label: 'A', sizeBytes: 100 },
+        { id: 'b', label: 'B', sizeBytes: 200 },
+      ],
+    } as WorkflowEvent,
     { type: 'download:start', id: 'a', label: 'A', sizeBytes: 100 } as WorkflowEvent,
-    { type: 'download:start', id: 'b', label: 'B', sizeBytes: 200 } as WorkflowEvent,
     { type: 'download:progress', id: 'a', got: 50, total: 100 } as WorkflowEvent,
   ]);
   const a = s.downloads.find((d) => d.id === 'a')!;
@@ -459,8 +491,29 @@ check('download:progress updates got/total for the matching id', () => {
   assert.equal(b.got, 0);
 });
 
+check('download:progress carries url through to state', () => {
+  const s = drive([
+    {
+      type: 'download:plan',
+      entries: [{ id: 'llm', label: 'LLM', sizeBytes: 100 }],
+    } as WorkflowEvent,
+    {
+      type: 'download:progress',
+      id: 'llm',
+      got: 50,
+      total: 100,
+      url: 'https://huggingface.co/x/y',
+    } as WorkflowEvent,
+  ]);
+  assert.equal(s.downloads[0].url, 'https://huggingface.co/x/y');
+});
+
 check('download:complete marks entry done', () => {
   const s = drive([
+    {
+      type: 'download:plan',
+      entries: [{ id: 'llm', label: 'LLM', sizeBytes: 100 }],
+    } as WorkflowEvent,
     { type: 'download:start', id: 'llm', label: 'LLM', sizeBytes: 100 } as WorkflowEvent,
     { type: 'download:complete', id: 'llm' } as WorkflowEvent,
   ]);

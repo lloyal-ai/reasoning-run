@@ -71,11 +71,17 @@ export type StepEvent =
   | { type: 'ui:plan_review' }
   | { type: 'ui:error'; message: string }
   // ── Boot-phase events: download progress + weight-loading spinner ──
+  /** Pre-populates `state.downloads` with the full set of files about to
+   *  be fetched. Sent ONCE before any individual download:start so the
+   *  dynamic tree size is fixed from the moment 'downloading' begins. */
+  | { type: 'download:plan'; entries: { id: string; label: string; sizeBytes: number }[] }
   | { type: 'download:start'; id: string; label: string; sizeBytes: number }
-  | { type: 'download:progress'; id: string; got: number; total: number }
+  | { type: 'download:progress'; id: string; got: number; total: number; url?: string }
   | { type: 'download:complete'; id: string }
   | { type: 'weights:start'; label: string }
   | { type: 'weights:label'; label: string }
-  | { type: 'weights:done' };
+  | { type: 'weights:done' }
+  | { type: 'corpus:indexed'; corpusPath: string; fileCount: number; chunkCount: number }
+  | { type: 'boot:error'; kind: 'llm' | 'reranker'; message: string };
 
 export type WorkflowEvent = AgentEvent | StepEvent;
