@@ -5,7 +5,6 @@ import { buildTurnDelta } from "@lloyal-labs/sdk";
 import {
   Ctx,
   Events,
-  agent,
   agentPool,
   createToolkit,
   useAgent,
@@ -38,8 +37,6 @@ import type {
 import PLAN_RAW from "./prompts/plan.eta";
 import PLAN_FLAT_RAW from "./prompts/plan-flat.eta";
 import FALLBACK_RAW from "./prompts/fallback.eta";
-import VERIFY_RAW from "./prompts/verify.eta";
-import EVAL_RAW from "./prompts/eval.eta";
 import RECOVERY_RAW from "./prompts/recovery.eta";
 import SYNTHESIZE_RAW from "./prompts/synthesize.eta";
 import SYNTHESIZE_FLAT_RAW from "./prompts/synthesize-flat.eta";
@@ -62,8 +59,6 @@ function parsePrompt(raw: string): { system: string; user: string } {
 const PLAN_DEEP = parsePrompt(PLAN_RAW);
 const PLAN_FLAT = parsePrompt(PLAN_FLAT_RAW);
 const FALLBACK = parsePrompt(FALLBACK_RAW);
-const VERIFY = parsePrompt(VERIFY_RAW);
-const EVAL = parsePrompt(EVAL_RAW);
 const RECOVERY = parsePrompt(RECOVERY_RAW);
 const SYNTHESIZE_DEEP = parsePrompt(SYNTHESIZE_RAW);
 const SYNTHESIZE_FLAT = parsePrompt(SYNTHESIZE_FLAT_RAW);
@@ -112,7 +107,6 @@ export type QueryResult =
   | { type: "clarify"; questions: string[] };
 
 export interface HarnessOpts {
-  verifyCount: number;
   maxTurns: number;
   findingsMaxChars?: number;
   reasoningMode: "flat" | "deep";
@@ -306,7 +300,7 @@ export function* runPassthroughBranch(
 }
 
 /**
- * Research branch: spawns research agents, runs synth, verify, eval, and
+ * Research branch: spawns research agents, runs synth, and
  * commits the warm spine. Emits the full research→complete event sequence.
  *
  * Safe to call directly from main.ts after a plan-review dialog confirms
@@ -546,66 +540,6 @@ export function* runResearchBranch(
   // so the flat-mode panel's finalize landed at the right cursor position.
   yield* send({ type: "answer", text: answer });
 
-  // ── Verify + Eval ─────────────────────────────────────────
-  const verifyContent = renderTemplate(VERIFY.user, {
-    agentFindings: answer || "(none)",
-    sourcePassages: "(spine)",
-    query,
-  });
-
-  const verifyTimer = startTimer();
-  yield* send({
-    type: "verify:start",
-    count: opts.verifyCount,
-    mode: opts.reasoningMode,
-  });
-  const verifyPool = yield* agentPool({
-    orchestrate: parallel(
-      Array.from({ length: opts.verifyCount }, (_, i) => ({
-        content: verifyContent,
-        systemPrompt: VERIFY.system,
-        seed: 2000 + i,
-      })),
-    ),
-  });
-  yield* send({
-    type: "verify:done",
-    count: opts.verifyCount,
-    timeMs: verifyTimer(),
-  });
-  const verifyOutputs = verifyPool.agents.map((a) => a.agent.rawOutput);
-
-  const responsesText = verifyOutputs
-    .map((r, i) => `Response ${i + 1}: ${r.trim()}`)
-    .join("\n\n");
-
-  const evalTimer = startTimer();
-  const evalAgent = yield* agent({
-    systemPrompt: EVAL.system,
-    task: renderTemplate(EVAL.user, { responses: responsesText }),
-    schema: {
-      type: "object",
-      properties: { converged: { type: "boolean" } },
-      required: ["converged"],
-    },
-  });
-  const evalTimeMs = evalTimer();
-
-  let evalConverged: boolean | null = null;
-  try {
-    evalConverged = JSON.parse(evalAgent.rawOutput).converged;
-  } catch {
-    /* malformed */
-  }
-
-  yield* send({
-    type: "eval:done",
-    converged: evalConverged,
-    tokenCount: evalAgent.tokenCount,
-    sampleCount: opts.verifyCount,
-    timeMs: evalTimeMs,
-  });
-
   // ── Commit warm spine ─────────────────────────────────────
   if (answer) yield* call(() => session.commitTurn(query, answer));
 
@@ -633,12 +567,6 @@ export function* runResearchBranch(
       detail: "spine fork",
       timeMs: synthTimeMs,
     },
-    {
-      label: "Eval",
-      tokens: evalAgent.tokenCount,
-      detail: `converged: ${evalConverged ? "yes" : "no"}`,
-      timeMs: evalTimeMs,
-    },
   ];
 
   yield* send({
@@ -656,15 +584,12 @@ export function* runResearchBranch(
       planTokens: plan.tokenCount,
       agentTokens: researchTotalTokens,
       synthTokens: synthTotalTokens,
-      evalTokens: evalAgent.tokenCount,
-      converged: evalConverged,
       totalToolCalls: researchTotalToolCalls,
       agentCount: tasks.length,
       wallTimeMs: Math.round(performance.now() - wallStartMs),
       planMs: Math.round(plan.timeMs),
       researchMs: Math.round(researchTimeMs),
       synthMs: Math.round(synthTimeMs),
-      evalMs: Math.round(evalTimeMs),
     },
   });
 }

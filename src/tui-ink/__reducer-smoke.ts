@@ -418,7 +418,7 @@ check('config:loaded seeds config without forcing a uiPhase transition', () => {
       config: {
         version: 1,
         sources: { tavilyKey: 'tvly-x' },
-        defaults: { reasoningMode: 'deep', verifyCount: 3, maxTurns: 10 },
+        defaults: { reasoningMode: 'deep', maxTurns: 10 },
         model: {},
       },
       origin: {
@@ -582,7 +582,7 @@ check('config:updated produces a toast; skipped fields flagged', () => {
   const cfg = {
     version: 1 as const,
     sources: { corpusPath: '/tmp/c' },
-    defaults: { reasoningMode: 'deep' as const, verifyCount: 3, maxTurns: 10 },
+    defaults: { reasoningMode: 'deep' as const, maxTurns: 10 },
     model: {},
   };
   const origin = {

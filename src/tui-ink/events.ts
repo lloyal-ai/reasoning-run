@@ -37,15 +37,6 @@ export type StepEvent =
       toolCallCount: number;
       timeMs: number;
     }
-  | { type: 'verify:start'; count: number; mode: 'flat' | 'deep' }
-  | { type: 'verify:done'; count: number; timeMs: number }
-  | {
-      type: 'eval:done';
-      converged: boolean | null;
-      tokenCount: number;
-      sampleCount: number;
-      timeMs: number;
-    }
   | { type: 'answer'; text: string }
   | {
       type: 'stats';

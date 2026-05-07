@@ -8,6 +8,8 @@ npx reasoning.run
 
 Then type a research question.
 
+> Built with **[HDK](https://hdk.lloyal.ai/)** — Lloyal's Harness Development Kit. The agentic envelope for local-first apps: models, tools, retrieval, and multi-agent orchestration in one import, no API keys, no inference servers.
+
 ## What it does
 
 - Downloads a Qwen3.5-4B LLM and Qwen3 reranker on first run (~3 GB, cached in `~/.cache/lloyal/models/`).
@@ -110,11 +112,19 @@ Standard readline chords (work in every terminal):
 
 For Cmd+Backspace / Cmd+arrow to work, turn on "Natural Text Editing" in iTerm2, or use Ghostty.
 
-## Source
+## Built with HDK
 
-- Built on [`@lloyal-labs/*`](https://github.com/lloyal-ai/hdk) (Lloyal's Harness Development Kit) for the agent runtime, session/branch primitives, and RIG tools.
-- Local inference via `@lloyal-labs/lloyal.node` (llama.cpp Node binding).
-- UI via Ink (React for terminals).
+reasoning.run is a working example of [Lloyal's **Harness Development Kit**](https://hdk.lloyal.ai/) — the same primitives ship intelligence directly into desktop and mobile apps, no cloud round-trip required. Specifically:
+
+- **`useAgent`** — single agents with tools and a terminal report tool. Powers the planner, the bridge, and synth.
+- **`agentPool` + `parallel`/`chain`** — multi-agent orchestration. Drives the research phase: parallel fan-out for `Fast` mode, chained tasks for `Deep` mode.
+- **Continuous Context Spine** — agents share GPU KV state instead of re-tokenizing strings, so a 32K-context pipeline runs on a consumer laptop. Why subsequent queries in the same session are warm and instant.
+- **Retrieval-Interleaved Generation (RIG)** — `WebSource` (Tavily) and `CorpusSource` (local markdown) plug in via the `Source` contract, with reranker-scored chunks fed inline during generation.
+- **`@lloyal-labs/lloyal.node`** — llama.cpp Node binding for in-process inference.
+
+If you like what reasoning.run does and want to build something similar — a local research tool, a domain-specific agent, an in-app assistant — read the [HDK docs](https://hdk.lloyal.ai/) and start with `useAgent`.
+
+UI is [Ink](https://github.com/vadimdemedes/ink) (React for terminals).
 
 ## License
 

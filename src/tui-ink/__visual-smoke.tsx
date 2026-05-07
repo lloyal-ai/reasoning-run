@@ -140,16 +140,6 @@ main(function* () {
       timeMs: 900,
     });
 
-    bus.send({ type: 'verify:start', count: 3, mode: 'flat' });
-    yield* sleep(300);
-    bus.send({ type: 'verify:done', count: 3, timeMs: 800 });
-    bus.send({
-      type: 'eval:done',
-      converged: true,
-      tokenCount: 18,
-      sampleCount: 3,
-      timeMs: 400,
-    });
     bus.send({
       type: 'stats',
       timings: [],

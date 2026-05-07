@@ -161,7 +161,6 @@ if (quietMode) {
   }
 }
 
-const VERIFY_COUNT = 3;
 const MAX_TOOL_TURNS = 10;
 
 // ── Corpus cache — load resources once per unique corpusPath ─────
@@ -674,7 +673,6 @@ main(function* () {
   uiChannel.send({ type: "ui:composer" });
 
   const harnessOpts = {
-    verifyCount: VERIFY_COUNT,
     maxTurns: MAX_TOOL_TURNS,
     findingsMaxChars,
     reasoningMode: liveConfig.defaults.reasoningMode,

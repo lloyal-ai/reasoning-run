@@ -263,7 +263,7 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
     case 'research:start':
       // Resume the pipeline timer — it was paused on ui:plan_review while
       // the user reviewed the plan. Accumulator holds the planning-phase
-      // time; now we add research/synth/verify/eval on top.
+      // time; now we add research/synth on top.
       return {
         ...state,
         uiPhase: 'research',
@@ -324,32 +324,6 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         },
       };
     }
-
-    case 'verify:start':
-      return {
-        ...state,
-        phase: 'verify',
-        verify: { active: true, count: ev.count, done: false, timeMs: null },
-      };
-
-    case 'verify:done':
-      return {
-        ...state,
-        verify: { active: false, count: ev.count, done: true, timeMs: ev.timeMs },
-      };
-
-    case 'eval:done':
-      return {
-        ...state,
-        phase: 'eval',
-        evalState: {
-          done: true,
-          converged: ev.converged,
-          sampleCount: ev.sampleCount,
-          tokenCount: ev.tokenCount,
-          timeMs: ev.timeMs,
-        },
-      };
 
     case 'answer':
       return { ...state, answer: ev.text };
@@ -601,7 +575,6 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         return { ...state, synth: { ...state.synth, buffer: state.synth.buffer + ev.text } };
       }
       // Muted phases.
-      if (state.phase === 'verify' || state.phase === 'eval') return state;
       if (state.phase !== 'research') return state;
 
       const agent = state.agents.get(ev.agentId);

@@ -9,7 +9,7 @@ export interface NarrativeProps {
 }
 
 /** Rows reserved above + below the narrative row for chrome (header, plan,
- *  synth/verify/eval, footer). Tuned by eye; may need adjusting if the
+ *  synth, footer). Tuned by eye; may need adjusting if the
  *  component tree above or below grows. */
 const CHROME_ROWS = 18;
 const MIN_COLUMN_WIDTH = 26;

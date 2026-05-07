@@ -9,8 +9,6 @@ import { Header } from './Header';
 import { FrozenAgentPanel } from './FrozenAgentPanel';
 import { Narrative } from './Narrative';
 import { Synth } from './Synth';
-import { Verify } from './Verify';
-import { Eval } from './Eval';
 import { Answer } from './Answer';
 import { Footer } from './Footer';
 import { Composer } from './Composer';
@@ -81,8 +79,6 @@ export function App({ bus, dispatch, bootstrap }: AppProps): React.ReactElement 
         {state.uiPhase === 'clarifying' && <ClarifyPanel state={state} />}
         {showResults && <Narrative state={state} />}
         {showResults && <Synth state={state} />}
-        {state.uiPhase === 'done' && <Verify state={state} />}
-        {state.uiPhase === 'done' && <Eval state={state} />}
         {state.uiPhase === 'done' && <Answer state={state} />}
         {showComposer && <Composer state={state} />}
         <Footer state={state} />

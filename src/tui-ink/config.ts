@@ -26,7 +26,6 @@ export interface ConfigSources {
 
 export interface ConfigDefaults {
   reasoningMode: 'flat' | 'deep';
-  verifyCount: number;
   maxTurns: number;
 }
 
@@ -93,7 +92,6 @@ function builtinDefaults(): Config {
     sources: {},
     defaults: {
       reasoningMode: 'deep',
-      verifyCount: 3,
       maxTurns: 10,
     },
     model: {},
@@ -159,7 +157,6 @@ export function loadConfig(
     sources: { tavilyKey, corpusPath, outputDir },
     defaults: {
       reasoningMode,
-      verifyCount: base.defaults.verifyCount,
       maxTurns: base.defaults.maxTurns,
     },
     model: { path: modelPath, reranker, nCtx },

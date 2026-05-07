@@ -11,7 +11,7 @@
 
 import type { Config, ConfigOrigin } from './config';
 
-export type Phase = 'idle' | 'query' | 'plan' | 'research' | 'synth' | 'verify' | 'eval' | 'done';
+export type Phase = 'idle' | 'query' | 'plan' | 'research' | 'synth' | 'done';
 
 /** Drives which top-level view the App renders. Distinct from `phase` —
  *  `phase` tracks the workflow progress; `uiPhase` tracks what the user
@@ -78,7 +78,7 @@ export interface AgentRuntime {
   phase: 'idle' | 'thinking' | 'content' | 'tool' | 'done';
   tokenCount: number;
   toolCallCount: number;
-  /** Research task index this agent was spawned for. Null for synth/verify/eval. */
+  /** Research task index this agent was spawned for. Null for synth. */
   taskIndex: number | null;
   /** Short task description, used in the column header when present. */
   taskDescription: string | null;
@@ -140,21 +140,6 @@ export interface SynthState {
   stats: { tokens: number; toolCalls: number; ppl: number; timeMs: number } | null;
 }
 
-export interface VerifyState {
-  active: boolean;
-  count: number;
-  done: boolean;
-  timeMs: number | null;
-}
-
-export interface EvalState {
-  done: boolean;
-  converged: boolean | null;
-  sampleCount: number;
-  tokenCount: number;
-  timeMs: number;
-}
-
 export interface OpTiming {
   label: string;
   tokens: number;
@@ -205,15 +190,13 @@ export interface AppState {
    *  by host within a result). Rendered in the footer. */
   sourceCount: number;
   synth: SynthState;
-  verify: VerifyState;
-  evalState: EvalState | null;
   answer: string | null;
   pressure: Pressure | null;
   timings: OpTiming[];
   startedAt: number;
   /** Accumulated milliseconds of pipeline-active time across the current
-   *  query's lifecycle (planning + research + synth + verify + eval).
-   *  Excludes plan-review dwell and composer idle. */
+   *  query's lifecycle (planning + research + synth). Excludes plan-review
+   *  dwell and composer idle. */
   pipelineElapsedMs: number;
   /** Timestamp (ms) of when the pipeline-active phase last resumed. Null
    *  while paused (plan_review, composer, done). Live elapsed = paused
@@ -277,8 +260,6 @@ export const initialState: AppState = {
   researchAgentIds: [],
   sourceCount: 0,
   synth: { open: false, buffer: '', done: false, stats: null },
-  verify: { active: false, count: 0, done: false, timeMs: null },
-  evalState: null,
   answer: null,
   pressure: null,
   timings: [],
