@@ -58,6 +58,13 @@ export type StepEvent =
       skipped: string[];
     }
   | { type: 'plan:start'; query: string; mode: 'flat' | 'deep' }
+  // ── Plan-edit events: user-driven mutations of state.plan.tasks before
+  // ── accept_plan. afterIndex: -1 means prepend; out-of-bounds indices
+  // ── on the others are reducer no-ops (defensive).
+  | { type: 'plan:task_updated'; index: number; description: string }
+  | { type: 'plan:task_added'; afterIndex: number }
+  | { type: 'plan:task_deleted'; index: number }
+  | { type: 'plan:task_moved'; from: number; to: number }
   | { type: 'ui:composer'; prefill?: string }
   | { type: 'ui:plan_review' }
   | { type: 'ui:error'; message: string }

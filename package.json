@@ -20,6 +20,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
+    "@inkjs/ui": "^2.0.0",
     "@lloyal-labs/lloyal-agents": "^2.0.0",
     "@lloyal-labs/lloyal.node": "^2.1.0",
     "@lloyal-labs/rig": "^2.0.1",

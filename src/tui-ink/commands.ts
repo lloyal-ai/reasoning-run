@@ -16,6 +16,10 @@ export type Command =
   | { type: 'cancel_plan' }
   | { type: 'edit_plan'; query: string }
   | { type: 'change_mode'; mode: 'flat' | 'deep' }
+  | { type: 'update_task_description'; index: number; description: string }
+  | { type: 'add_task'; afterIndex: number }
+  | { type: 'delete_task'; index: number }
+  | { type: 'move_task'; from: number; to: number }
   | { type: 'set_tavily_key'; key: string }
   | { type: 'set_corpus_path'; path: string }
   | { type: 'set_output_dir'; path: string }

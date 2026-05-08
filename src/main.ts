@@ -980,6 +980,61 @@ main(function* () {
       } else if (cmd.type === "edit_plan") {
         pendingPlan = null;
         yield* events.send({ type: "ui:composer", prefill: cmd.query });
+      } else if (cmd.type === "update_task_description" && pendingPlan) {
+        // Update the canonical plan held alongside the reducer state so
+        // accept_plan reads the edited tasks. The reducer also updates
+        // its copy via the plan:task_updated event below.
+        pendingPlan.plan.tasks = pendingPlan.plan.tasks.map((t, i) =>
+          i === cmd.index ? { ...t, description: cmd.description } : t,
+        );
+        yield* events.send({
+          type: "plan:task_updated",
+          index: cmd.index,
+          description: cmd.description,
+        });
+      } else if (cmd.type === "add_task" && pendingPlan) {
+        const insertAt = Math.max(
+          0,
+          Math.min(pendingPlan.plan.tasks.length, cmd.afterIndex + 1),
+        );
+        pendingPlan.plan.tasks = [
+          ...pendingPlan.plan.tasks.slice(0, insertAt),
+          { description: "" },
+          ...pendingPlan.plan.tasks.slice(insertAt),
+        ];
+        yield* events.send({
+          type: "plan:task_added",
+          afterIndex: cmd.afterIndex,
+        });
+      } else if (cmd.type === "delete_task" && pendingPlan) {
+        if (pendingPlan.plan.tasks.length > 1) {
+          pendingPlan.plan.tasks = pendingPlan.plan.tasks.filter(
+            (_, i) => i !== cmd.index,
+          );
+          yield* events.send({
+            type: "plan:task_deleted",
+            index: cmd.index,
+          });
+        }
+      } else if (cmd.type === "move_task" && pendingPlan) {
+        const n = pendingPlan.plan.tasks.length;
+        if (
+          cmd.from !== cmd.to &&
+          cmd.from >= 0 &&
+          cmd.from < n &&
+          cmd.to >= 0 &&
+          cmd.to < n
+        ) {
+          const tasks = [...pendingPlan.plan.tasks];
+          const [moved] = tasks.splice(cmd.from, 1);
+          tasks.splice(cmd.to, 0, moved);
+          pendingPlan.plan.tasks = tasks;
+          yield* events.send({
+            type: "plan:task_moved",
+            from: cmd.from,
+            to: cmd.to,
+          });
+        }
       }
     } catch (err) {
       pendingPlan = null;

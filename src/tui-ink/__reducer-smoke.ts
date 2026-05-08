@@ -47,6 +47,122 @@ check('plan with research intent → phase stays plan', () => {
   assert.equal(s.plan?.tasks.length, 2);
 });
 
+// ── Plan-edit reducer cases ────────────────────────────────────
+function planSeed(): WorkflowEvent[] {
+  return [
+    { type: 'query', query: 'q', warm: false },
+    {
+      type: 'plan',
+      intent: 'research',
+      tasks: [
+        { description: 't1' },
+        { description: 't2' },
+        { description: 't3' },
+      ] as never,
+      clarifyQuestions: [],
+      tokenCount: 42,
+      timeMs: 1200,
+    },
+  ];
+}
+
+check('plan:task_updated rewrites the description at the right index', () => {
+  const s = drive([
+    ...planSeed(),
+    { type: 'plan:task_updated', index: 1, description: 'new t2' } as WorkflowEvent,
+  ]);
+  assert.equal(s.plan?.tasks.length, 3);
+  assert.equal(s.plan?.tasks[0].description, 't1');
+  assert.equal(s.plan?.tasks[1].description, 'new t2');
+  assert.equal(s.plan?.tasks[2].description, 't3');
+});
+
+check('plan:task_updated out-of-bounds is a no-op', () => {
+  const s = drive([
+    ...planSeed(),
+    { type: 'plan:task_updated', index: 99, description: 'ignored' } as WorkflowEvent,
+  ]);
+  assert.equal(s.plan?.tasks.length, 3);
+  assert.equal(s.plan?.tasks[0].description, 't1');
+});
+
+check('plan:task_added afterIndex=0 inserts at index 1', () => {
+  const s = drive([
+    ...planSeed(),
+    { type: 'plan:task_added', afterIndex: 0 } as WorkflowEvent,
+  ]);
+  assert.equal(s.plan?.tasks.length, 4);
+  assert.equal(s.plan?.tasks[0].description, 't1');
+  assert.equal(s.plan?.tasks[1].description, '');
+  assert.equal(s.plan?.tasks[2].description, 't2');
+});
+
+check('plan:task_added afterIndex=-1 prepends', () => {
+  const s = drive([
+    ...planSeed(),
+    { type: 'plan:task_added', afterIndex: -1 } as WorkflowEvent,
+  ]);
+  assert.equal(s.plan?.tasks.length, 4);
+  assert.equal(s.plan?.tasks[0].description, '');
+  assert.equal(s.plan?.tasks[1].description, 't1');
+});
+
+check('plan:task_deleted removes the indexed task', () => {
+  const s = drive([
+    ...planSeed(),
+    { type: 'plan:task_deleted', index: 1 } as WorkflowEvent,
+  ]);
+  assert.equal(s.plan?.tasks.length, 2);
+  assert.equal(s.plan?.tasks[0].description, 't1');
+  assert.equal(s.plan?.tasks[1].description, 't3');
+});
+
+check('plan:task_deleted is a no-op when only 1 task', () => {
+  const s = drive([
+    { type: 'query', query: 'q', warm: false },
+    {
+      type: 'plan',
+      intent: 'research',
+      tasks: [{ description: 'only one' }] as never,
+      clarifyQuestions: [],
+      tokenCount: 1,
+      timeMs: 1,
+    },
+    { type: 'plan:task_deleted', index: 0 } as WorkflowEvent,
+  ]);
+  assert.equal(s.plan?.tasks.length, 1);
+  assert.equal(s.plan?.tasks[0].description, 'only one');
+});
+
+check('plan:task_moved swaps the right indices', () => {
+  const s = drive([
+    ...planSeed(),
+    { type: 'plan:task_moved', from: 0, to: 2 } as WorkflowEvent,
+  ]);
+  assert.equal(s.plan?.tasks.length, 3);
+  assert.equal(s.plan?.tasks[0].description, 't2');
+  assert.equal(s.plan?.tasks[1].description, 't3');
+  assert.equal(s.plan?.tasks[2].description, 't1');
+});
+
+check('plan:task_moved out-of-bounds to is a no-op', () => {
+  const s = drive([
+    ...planSeed(),
+    { type: 'plan:task_moved', from: 0, to: 99 } as WorkflowEvent,
+  ]);
+  assert.equal(s.plan?.tasks[0].description, 't1');
+  assert.equal(s.plan?.tasks[1].description, 't2');
+  assert.equal(s.plan?.tasks[2].description, 't3');
+});
+
+check('plan:task_moved from === to is a no-op', () => {
+  const s = drive([
+    ...planSeed(),
+    { type: 'plan:task_moved', from: 1, to: 1 } as WorkflowEvent,
+  ]);
+  assert.equal(s.plan?.tasks[1].description, 't2');
+});
+
 check('chain agent:spawn opens a timeline with a live think block', () => {
   const s = drive([
     { type: 'query', query: 'q', warm: false },

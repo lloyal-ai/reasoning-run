@@ -260,6 +260,48 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
           : null,
       };
 
+    case 'plan:task_updated': {
+      if (!state.plan) return state;
+      if (ev.index < 0 || ev.index >= state.plan.tasks.length) return state;
+      const tasks = state.plan.tasks.map((t, i) =>
+        i === ev.index ? { ...t, description: ev.description } : t,
+      );
+      return { ...state, plan: { ...state.plan, tasks } };
+    }
+
+    case 'plan:task_added': {
+      if (!state.plan) return state;
+      // afterIndex: -1 prepends; otherwise insert at afterIndex + 1.
+      const insertAt = Math.max(0, Math.min(state.plan.tasks.length, ev.afterIndex + 1));
+      const tasks = [
+        ...state.plan.tasks.slice(0, insertAt),
+        { description: '' },
+        ...state.plan.tasks.slice(insertAt),
+      ];
+      return { ...state, plan: { ...state.plan, tasks } };
+    }
+
+    case 'plan:task_deleted': {
+      if (!state.plan) return state;
+      // Don't allow deleting the only task — keeps the plan-review valid.
+      if (state.plan.tasks.length <= 1) return state;
+      if (ev.index < 0 || ev.index >= state.plan.tasks.length) return state;
+      const tasks = state.plan.tasks.filter((_, i) => i !== ev.index);
+      return { ...state, plan: { ...state.plan, tasks } };
+    }
+
+    case 'plan:task_moved': {
+      if (!state.plan) return state;
+      const n = state.plan.tasks.length;
+      if (ev.from === ev.to) return state;
+      if (ev.from < 0 || ev.from >= n) return state;
+      if (ev.to < 0 || ev.to >= n) return state;
+      const tasks = [...state.plan.tasks];
+      const [moved] = tasks.splice(ev.from, 1);
+      tasks.splice(ev.to, 0, moved);
+      return { ...state, plan: { ...state.plan, tasks } };
+    }
+
     case 'research:start':
       // Resume the pipeline timer — it was paused on ui:plan_review while
       // the user reviewed the plan. Accumulator holds the planning-phase
