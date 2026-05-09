@@ -1,25 +1,32 @@
 /**
- * Composer — Gemini-style bottom-docked query input + mode toggle +
- * source chips. Slash commands replace the previous Esc-then-letter
- * menu: type `/` to invoke commands inline.
+ * Composer — Gemini-style bottom-docked query input + source chips +
+ * PLAN/START submit selector. Slash commands invoke modal actions
+ * inline (type `/` to begin).
  *
  * Slash command grammar:
  *   /cmd               → open the inline editor for `cmd` (pre-filled with
  *                        current value); user submits to commit.
  *   /cmd <value>       → set `cmd` to `value` directly, no editor step.
- *   /deep | /fast      → set reasoning mode immediately.
+ *   /deep | /flat      → set reasoning mode immediately (power-user
+ *                        shortcut; primary toggle lives in PlanReview).
  *   /quit              → exit the program.
  *   /help              → show this list.
  *
- * Available value commands: /tavily /corpus /output.
+ * Reasoning mode (Deep/Flat) is intentionally absent from the visible
+ * composer — it's chosen on the PlanReview screen via T-toggle, where
+ * the user can see what the planner produced before committing to a
+ * shape. The composer focuses on "what" (query, sources, submit
+ * intent); plan-review handles "how".
  *
  * Keybindings on the query field:
- *   Enter   → submit (or invoke slash command if input starts with `/`)
- *   Tab     → toggle reasoning mode (deep ↔ fast); when input starts with
- *             `/`, autocompletes to the unique matching command.
- *   Esc     → in clarifying mode: cancel pending plan and return to composer.
- *             Otherwise: clear current input.
- *   Ctrl-C  → quit
+ *   Enter      → submit using the focused button (PLAN runs the planner;
+ *                START synthesizes a single-task plan and runs research).
+ *   Shift+Tab  → toggle PLAN ↔ START.
+ *   Tab        → autocomplete the current slash command (no-op outside
+ *                slash mode).
+ *   Esc        → in clarifying mode: cancel pending plan. Otherwise: clear
+ *                input.
+ *   Ctrl-C     → quit.
  */
 
 import React, { memo, useEffect, useState } from 'react';
@@ -47,7 +54,7 @@ const COMMANDS: SlashCmd[] = [
   { name: 'reranker', desc: 'Set local reranker .gguf path', kind: 'value' },
   { name: 'output', desc: 'Set output directory', kind: 'value' },
   { name: 'deep', desc: 'Use deep (chain) reasoning', kind: 'instant' },
-  { name: 'fast', desc: 'Use fast (parallel) reasoning', kind: 'instant' },
+  { name: 'flat', desc: 'Use flat (parallel) reasoning', kind: 'instant' },
   { name: 'help', desc: 'Show this list', kind: 'instant' },
   { name: 'quit', desc: 'Quit', kind: 'instant' },
 ];
@@ -82,12 +89,39 @@ export interface ComposerProps {
 
 export const Composer = memo(function Composer({ state }: ComposerProps): React.ReactElement {
   const dispatch = useCommand();
-  const defaultMode = state.config?.defaults.reasoningMode ?? 'deep';
+  const defaultMode = state.config?.defaults.reasoningMode ?? 'flat';
   const [mode, setMode] = useState<'flat' | 'deep'>(defaultMode);
   const [field, setField] = useState<Field>('query');
   const [query, setQuery] = useState('');
   const [draft, setDraft] = useState('');
   const [showHelp, setShowHelp] = useState(false);
+  // Submit mode toggled by Shift+Tab. PLAN runs the planner and shows
+  // the plan-review dialog; START synthesizes a single-task plan from
+  // the literal query and skips plan-review. Default flips after the
+  // first completed report: cold start → PLAN (the planner shapes a
+  // research plan from a fresh query); warm follow-up → START (after
+  // a report, most queries are conversational follow-ups that don't
+  // need re-planning).
+  //
+  // Signal: scrollback length. The reducer pushes synth/agent items
+  // into scrollback once research+synth complete, so >0 reliably
+  // means "at least one report has finished". We avoid `state.warm`
+  // here because it only refreshes on the NEXT `query` event (it's
+  // sourced from `!!session.trunk` at that moment), so it's stale
+  // during the window between report completion and follow-up
+  // submission — exactly the window where the user sees the
+  // composer.
+  const hasReport = state.scrollback.length > 0;
+  const [submitMode, setSubmitMode] = useState<'plan' | 'start'>(
+    hasReport ? 'start' : 'plan',
+  );
+
+  // When the first report's content lands in scrollback, flip the
+  // default. Subsequent user toggles via Shift+Tab override this.
+  useEffect(() => {
+    if (hasReport) setSubmitMode('start');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasReport]);
 
   // Apply a prefill from "edit plan" when the composer regains focus.
   useEffect(() => {
@@ -124,6 +158,13 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         dispatch({ type: 'quit' });
         return;
       }
+      if (key.tab && key.shift) {
+        // Shift+Tab toggles submit target between PLAN and START.
+        if (!inSlash && !clarifying) {
+          setSubmitMode((m) => (m === 'plan' ? 'start' : 'plan'));
+        }
+        return;
+      }
       if (key.tab) {
         if (inSlash && parsedSlash && parsedSlash.name && matches.length === 1) {
           const cmd = matches[0];
@@ -132,9 +173,9 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
           setQuery('/' + cmd.name + (cmd.kind === 'value' ? ' ' : ''));
           return;
         }
-        if (!inSlash) {
-          setMode((m) => (m === 'deep' ? 'flat' : 'deep'));
-        }
+        // Tab outside slash mode is a no-op now that reasoning mode
+        // (Deep/Flat) is chosen on the PlanReview screen via T-toggle,
+        // not in the composer.
         return;
       }
       if (key.escape) {
@@ -172,7 +213,12 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
       return;
     }
     if (!hasSource) return;
-    dispatch({ type: 'submit_query', query: trimmed, mode });
+    dispatch({
+      type: 'submit_query',
+      query: trimmed,
+      mode,
+      skipPlanner: submitMode === 'start',
+    });
     setQuery('');
   };
 
@@ -188,7 +234,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
     setShowHelp(false);
     if (cmd.kind === 'instant') {
       if (name === 'deep') setMode('deep');
-      else if (name === 'fast') setMode('flat');
+      else if (name === 'flat') setMode('flat');
       else if (name === 'quit') dispatch({ type: 'quit' });
       else if (name === 'help') setShowHelp(true);
       return;
@@ -359,10 +405,11 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         </Box>
       ) : null}
 
-      {/* Chips row */}
+      {/* Chips row — sources + the primary PLAN/START buttons.
+          Reasoning mode (Deep/Flat) is chosen on the PlanReview screen
+          (T toggles), not here — keeping the composer focused on
+          "what" and deferring "how" to plan-review. */}
       <Box marginTop={0}>
-        <ModeChip mode={mode} />
-        <Text>  </Text>
         <SourceChip
           label="Web"
           origin={tavilyOrigin}
@@ -388,6 +435,11 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
           value={state.config?.sources.outputDir ?? null}
         />
         <Box flexGrow={1} />
+        {field === 'query' && !clarifying && !inSlash ? (
+          <SubmitButtons submitMode={submitMode} />
+        ) : null}
+      </Box>
+      <Box marginTop={0}>
         <HintRow
           field={field}
           hasSource={hasSource}
@@ -423,20 +475,6 @@ const SlashCmdRow = memo(function SlashCmdRow({ cmd }: { cmd: SlashCmd }): React
       <Text dimColor>{' · '}{cmd.desc}</Text>
       {cmd.kind === 'value' ? <Text dimColor>{' <value>'}</Text> : null}
     </Box>
-  );
-});
-
-const ModeChip = memo(function ModeChip({ mode }: { mode: 'flat' | 'deep' }): React.ReactElement {
-  return (
-    <Text>
-      <Text color={mode === 'deep' ? 'cyan' : undefined} bold={mode === 'deep'}>
-        {mode === 'deep' ? '◆' : '○'} Deep
-      </Text>
-      <Text dimColor>  </Text>
-      <Text color={mode === 'flat' ? 'cyan' : undefined} bold={mode === 'flat'}>
-        {mode === 'flat' ? '◆' : '○'} Fast
-      </Text>
-    </Text>
   );
 });
 
@@ -495,5 +533,45 @@ const HintRow = memo(function HintRow({
   if (!hasSource) {
     return <Text color="yellow">⚠ Add a source via /web or /scan</Text>;
   }
-  return <Text dimColor>Tab toggle mode · / commands · ⏎ submit</Text>;
+  // ⏎ submit is implied by the highlighted button. Just the
+  // PLAN/START toggle and slash-command pointer here.
+  return <Text dimColor>⇧Tab Plan/Start · / commands</Text>;
 });
+
+const SubmitButtons = memo(function SubmitButtons({
+  submitMode,
+}: {
+  submitMode: 'plan' | 'start';
+}): React.ReactElement {
+  // Primary action buttons. Reasoning mode (Deep/Flat) lives on the
+  // PlanReview screen, not here.
+  return (
+    <Box>
+      <SubmitButton label="PLAN" focused={submitMode === 'plan'} hue="cyan" />
+      <Text>  </Text>
+      <SubmitButton label="START" focused={submitMode === 'start'} hue="green" />
+    </Box>
+  );
+});
+
+const SubmitButton = memo(function SubmitButton({
+  label,
+  focused,
+  hue,
+}: {
+  label: string;
+  focused: boolean;
+  hue: 'cyan' | 'green';
+}): React.ReactElement {
+  const glyph = focused ? '◉' : '○';
+  const body = ` ${glyph} ${label} `;
+  if (focused) {
+    return (
+      <Text backgroundColor={hue} color="black" bold>
+        {body}
+      </Text>
+    );
+  }
+  return <Text dimColor>{body}</Text>;
+});
+

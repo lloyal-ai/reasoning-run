@@ -2,27 +2,22 @@
  * PlanReview — center dialog shown after the planner returns a research
  * plan and before research starts.
  *
- * Always-editable list (no editor "mode" toggle). One keymap, no overlap
- * on Enter:
+ * Focus moves over a single sequence: tasks 0..N-1, then a START button
+ * at position N. Default focus is the START button so the happy path
+ * (looks good, run it) is one keystroke. Enter does the right thing
+ * for whatever's focused — edit a task, or start research — mirroring
+ * the Composer's PLAN/START button pattern.
  *
- *   ↑↓        select task
- *   ⏎         edit focused task (opens inline TextInput)
- *   A or +    add empty task after focused
- *   D or Del  delete focused (no-op if only 1 task)
- *   ⇧↑ ⇧↓    move focused up/down
- *   S         start research (the only way; Enter never triggers it)
- *   T         toggle reasoning mode (Deep/Fast — re-plans, discards edits)
+ *   ↑↓        move focus over tasks and the START button
+ *   ⏎         on a task → edit it; on START → start research
+ *   A or +    add empty task after focus (or at end if on START)
+ *   D or Del  delete focused task (no-op if only 1 task or on START)
+ *   ⇧↑ ⇧↓    move focused task up/down
+ *   T         toggle reasoning mode (Deep/Flat — re-plans, discards edits)
  *   Esc       cancel plan
  *
  * In single-task edit (focused row replaced by TextInput):
  *   ⏎         save  ·  Esc  revert
- *
- * Why no modes: the previous design gated CRUD behind an explicit
- * "editor mode" (E to enter, Esc to exit) so Enter could mean "Start
- * research" by default. Users hit Enter expecting "edit focused task"
- * and got research started instead. Removing the mode means Enter has
- * one stable meaning ("edit focused thing") and S has the other
- * ("start"). Distinct keys, no overlap.
  *
  * Why a stateRef workaround: Ink 7's useInput uses React 19's
  * useEffectEvent under the hood. In practice (React 19.2.5 + Ink
@@ -49,26 +44,31 @@ export interface PlanReviewProps {
 export const PlanReview = memo(function PlanReview({ state }: PlanReviewProps): React.ReactElement | null {
   const dispatch = useCommand();
   const plan = state.plan;
-  const [mode, setMode] = useState<'flat' | 'deep'>(state.mode ?? 'deep');
-  const [focusedIndex, setFocusedIndex] = useState(0);
+  const [mode, setMode] = useState<'flat' | 'deep'>(state.mode ?? 'flat');
+  // focusedIndex semantics: 0..tasks.length-1 selects a task,
+  // tasks.length selects the START button. Default to the START button
+  // so the common case (review and run) is a single Enter press.
+  const [focusedIndex, setFocusedIndex] = useState(() => plan?.tasks.length ?? 0);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [draft, setDraft] = useState('');
 
-  // Reset focus + draft when the planner replaces the task list (T
-  // toggle re-plans). Local mutations (add/delete/move) leave focus
-  // alone — handled by the next effect.
+  // Re-anchor on the START button when the planner replaces the task
+  // list (T toggle re-plans). Local mutations (add/delete/move) leave
+  // focus alone — handled by the clamp effect below.
   useEffect(() => {
     if (state.mode && state.mode !== mode) setMode(state.mode);
     setEditingIndex(null);
-    setFocusedIndex(0);
+    setFocusedIndex(plan?.tasks.length ?? 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.mode]);
 
-  // Clamp focus when tasks shrink (delete on last task).
+  // Clamp focus when tasks shrink. Inclusive of tasks.length because
+  // that index is the START button — staying on the button across
+  // delete/add operations is the desired behavior.
   useEffect(() => {
     if (!plan) return;
-    if (focusedIndex >= plan.tasks.length) {
-      setFocusedIndex(Math.max(0, plan.tasks.length - 1));
+    if (focusedIndex > plan.tasks.length) {
+      setFocusedIndex(plan.tasks.length);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan?.tasks.length]);
@@ -116,7 +116,7 @@ export const PlanReview = memo(function PlanReview({ state }: PlanReviewProps): 
       return;
     }
 
-    // ── Research-plan keymap (no modes) ───────────────────────────
+    // ── Research-plan keymap ─────────────────────────────────────
     if (key.ctrl && input === 'c') {
       dispatch({ type: 'quit' });
       return;
@@ -126,23 +126,18 @@ export const PlanReview = memo(function PlanReview({ state }: PlanReviewProps): 
       return;
     }
 
-    // S starts research. Distinct from Enter (which edits) so Enter
-    // can't accidentally start research the user didn't mean to.
-    if (input === 's' || input === 'S') {
-      dispatch({ type: 'accept_plan' });
-      return;
-    }
+    const onButton = focusedIndex >= plan.tasks.length;
 
-    // Reorder (Shift + arrows) before plain arrows.
+    // Reorder (Shift + arrows) — only meaningful when on a task.
     if (key.shift && key.upArrow) {
-      if (focusedIndex > 0) {
+      if (!onButton && focusedIndex > 0) {
         dispatch({ type: 'move_task', from: focusedIndex, to: focusedIndex - 1 });
         setFocusedIndex(focusedIndex - 1);
       }
       return;
     }
     if (key.shift && key.downArrow) {
-      if (focusedIndex < plan.tasks.length - 1) {
+      if (!onButton && focusedIndex < plan.tasks.length - 1) {
         dispatch({ type: 'move_task', from: focusedIndex, to: focusedIndex + 1 });
         setFocusedIndex(focusedIndex + 1);
       }
@@ -153,20 +148,26 @@ export const PlanReview = memo(function PlanReview({ state }: PlanReviewProps): 
       return;
     }
     if (key.downArrow) {
-      setFocusedIndex(Math.min(plan.tasks.length - 1, focusedIndex + 1));
+      // Inclusive of tasks.length — that's the START button row.
+      setFocusedIndex(Math.min(plan.tasks.length, focusedIndex + 1));
       return;
     }
 
     if (key.return) {
-      // Always: edit the focused task. (Start research is on S.)
-      setDraft(plan.tasks[focusedIndex]?.description ?? '');
-      setEditingIndex(focusedIndex);
+      if (onButton) {
+        dispatch({ type: 'accept_plan' });
+      } else {
+        setDraft(plan.tasks[focusedIndex]?.description ?? '');
+        setEditingIndex(focusedIndex);
+      }
       return;
     }
 
     if (input === 'a' || input === 'A' || input === '+') {
-      const newIndex = focusedIndex + 1;
-      dispatch({ type: 'add_task', afterIndex: focusedIndex });
+      // On the button: add at end. On a task: add after it.
+      const afterIndex = onButton ? plan.tasks.length - 1 : focusedIndex;
+      const newIndex = afterIndex + 1;
+      dispatch({ type: 'add_task', afterIndex });
       setFocusedIndex(newIndex);
       setDraft('');
       setEditingIndex(newIndex);
@@ -174,7 +175,7 @@ export const PlanReview = memo(function PlanReview({ state }: PlanReviewProps): 
     }
 
     if (input === 'd' || input === 'D' || key.delete) {
-      if (plan.tasks.length > 1) {
+      if (!onButton && plan.tasks.length > 1) {
         dispatch({ type: 'delete_task', index: focusedIndex });
       }
       return;
@@ -267,6 +268,7 @@ export const PlanReview = memo(function PlanReview({ state }: PlanReviewProps): 
             onCancel={() => setEditingIndex(null)}
           />
         ))}
+        <StartButton focused={focusedIndex >= plan.tasks.length && !editing} />
       </Box>
 
       <Box marginTop={1}>
@@ -275,29 +277,41 @@ export const PlanReview = memo(function PlanReview({ state }: PlanReviewProps): 
         </Text>
         <Text>  </Text>
         <Text color={mode === 'flat' ? 'cyan' : undefined} bold={mode === 'flat'}>
-          {mode === 'flat' ? '◆' : '○'} Fast
+          {mode === 'flat' ? '◆' : '○'} Flat
         </Text>
         <Text dimColor>     T toggle mode (re-plans, discards edits)</Text>
       </Box>
 
-      <Box marginTop={1} flexDirection="column">
+      <Box marginTop={1}>
         {editing ? (
           <Text dimColor>⏎ save · Esc revert</Text>
         ) : (
-          <>
-            <Box>
-              <Text dimColor>↑↓ select · </Text>
-              <Text color="cyan" bold>⏎ edit</Text>
-              <Text dimColor> · A add · D delete · ⇧↑↓ reorder · Esc cancel</Text>
-            </Box>
-            <Box>
-              <Text color="green" bold>S</Text>
-              <Text> </Text>
-              <Text color="green" bold>start research →</Text>
-            </Box>
-          </>
+          <Text dimColor>↑↓ select · ⏎ {focusedIndex >= plan.tasks.length ? 'start research' : 'edit'} · A add · D delete · ⇧↑↓ reorder · Esc cancel</Text>
         )}
       </Box>
+    </Box>
+  );
+});
+
+const StartButton = memo(function StartButton({
+  focused,
+}: {
+  focused: boolean;
+}): React.ReactElement {
+  // Mirrors the Composer's primary submit button: green pill when
+  // focused (the action you'll get on Enter), dim row otherwise.
+  if (focused) {
+    return (
+      <Box paddingLeft={2} marginTop={1}>
+        <Text backgroundColor="green" color="black" bold>
+          {' ▶ START research '}
+        </Text>
+      </Box>
+    );
+  }
+  return (
+    <Box paddingLeft={2} marginTop={1}>
+      <Text dimColor>{'   ▶ START research'}</Text>
     </Box>
   );
 });

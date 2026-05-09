@@ -8,8 +8,8 @@
  * Env-provided secrets (`TAVILY_API_KEY`) always win at read time and
  * are never written to disk.
  *
- * JSONL / non-TTY mode: bypasses Ink entirely; `handleQuery` composes
- * runPlanner + runResearchBranch and emits the usual event stream.
+ * JSONL / non-TTY mode: bypasses Ink entirely; `runQuery` + `runResearchPlan`
+ * compose the planner → research → answer pipeline with the same event stream.
  */
 
 import * as fs from "node:fs";
@@ -59,10 +59,9 @@ import {
 import type { Resource } from "@lloyal-labs/rig/node";
 import ignoreFactory from "ignore";
 import {
-  handleQuery,
-  runPlanner,
-  runPassthroughBranch,
-  runResearchBranch,
+  runQuery,
+  runResearchPlan,
+  singleTaskPlan,
 } from "./harness";
 import {
   downloadIfMissing,
@@ -687,9 +686,10 @@ main(function* () {
   }
 
   // ── JSONL / --query scripted path ──────────────────────────
-  // When Ink isn't mounted, fall back to the existing handleQuery
-  // composer. `--query` without a TTY runs exactly one query then exits;
-  // otherwise there's nowhere for follow-ups to come from.
+  // When Ink isn't mounted, run runQuery and (if the planner returned a
+  // research plan) auto-execute it via runResearchPlan. `--query` without
+  // a TTY runs exactly one query then exits; clarify isn't actionable
+  // (no UI to answer questions) and aborts.
   if (!useInk) {
     if (!initialQuery) {
       process.stderr.write("Non-TTY mode requires --query.\n");
@@ -702,8 +702,30 @@ main(function* () {
       );
       process.exit(2);
     }
-    startRunDir(initialQuery, liveConfig.defaults.reasoningMode);
-    yield* handleQuery(initialQuery, session, sources, reranker, harnessOpts);
+    const wallStartMs = performance.now();
+    const result = yield* runQuery(initialQuery, session, sources, reranker, {
+      ...harnessOpts,
+      wallStartMs,
+      onStart: () =>
+        startRunDir(initialQuery, liveConfig.defaults.reasoningMode),
+    });
+    if (result.type === "clarify") {
+      process.stderr.write(
+        "Planner asked clarifying questions; non-TTY mode can't answer. Aborting.\n",
+      );
+      process.exit(2);
+    }
+    if (result.type === "research_plan") {
+      startRunDir(initialQuery, liveConfig.defaults.reasoningMode);
+      yield* runResearchPlan(
+        initialQuery,
+        result.plan,
+        session,
+        sources,
+        reranker,
+        { ...harnessOpts, wallStartMs },
+      );
+    }
     return;
   }
 
@@ -723,17 +745,20 @@ main(function* () {
   if (initialQuery) {
     const mode = liveConfig.defaults.reasoningMode;
     const wallStartMs = performance.now();
-    yield* events.send({ type: "plan:start", query: initialQuery, mode });
-    const plan = yield* runPlanner(initialQuery, session, {
+    const sources = buildSources(liveConfig);
+    const result = yield* runQuery(initialQuery, session, sources, reranker, {
+      ...harnessOpts,
       reasoningMode: mode,
+      wallStartMs,
+      onStart: () => startRunDir(initialQuery, mode),
     });
-    if (plan.intent === "passthrough") {
-      startRunDir(initialQuery, mode);
-      yield* runPassthroughBranch(initialQuery, session, plan, wallStartMs);
-      yield* events.send({ type: "ui:composer" });
-    } else {
-      pendingPlan = { plan, query: initialQuery, mode, wallStartMs };
+    if (result.type === "research_plan") {
+      pendingPlan = { plan: result.plan, query: initialQuery, mode, wallStartMs };
       yield* events.send({ type: "ui:plan_review" });
+    } else if (result.type === "clarify") {
+      pendingPlan = { plan: result.plan, query: initialQuery, mode, wallStartMs };
+    } else {
+      yield* events.send({ type: "ui:composer" });
     }
   }
 
@@ -846,7 +871,6 @@ main(function* () {
         });
         if (resolved) yield* events.send({ type: "ui:composer" });
       } else if (cmd.type === "submit_query") {
-        const wallStartMs = performance.now();
         const sources = buildSources(liveConfig);
         if (sources.length === 0) {
           yield* events.send({
@@ -855,31 +879,69 @@ main(function* () {
           });
           continue;
         }
-        const plannerContext = buildPlannerContext(sources);
-        yield* events.send({
-          type: "plan:start",
-          query: cmd.query,
-          mode: cmd.mode,
-        });
-        const plan = yield* runPlanner(cmd.query, session, {
-          reasoningMode: cmd.mode,
-          context: plannerContext,
-        });
-        if (plan.intent === "passthrough") {
+        const wallStartMs = performance.now();
+        if (cmd.skipPlanner) {
+          // START path: skip the planner entirely. The user's literal
+          // query becomes a single research task. The synth gate inside
+          // runResearchPlan auto-skips synth for single-task plans, so
+          // the lone agent's report flows out as the answer.
+          const plan = singleTaskPlan(cmd.query);
+          yield* events.send({
+            type: "plan:start",
+            query: cmd.query,
+            mode: cmd.mode,
+          });
+          yield* events.send({
+            type: "query",
+            query: cmd.query,
+            warm: !!session.trunk,
+          });
+          yield* events.send({
+            type: "plan",
+            intent: plan.intent,
+            tasks: plan.tasks,
+            clarifyQuestions: plan.clarifyQuestions,
+            tokenCount: plan.tokenCount,
+            timeMs: plan.timeMs,
+          });
           startRunDir(cmd.query, cmd.mode);
-          yield* runPassthroughBranch(cmd.query, session, plan, wallStartMs);
+          yield* runResearchPlan(cmd.query, plan, session, sources, reranker, {
+            ...harnessOpts,
+            reasoningMode: cmd.mode,
+            wallStartMs,
+          });
           yield* events.send({ type: "ui:composer" });
-        } else if (plan.intent === "clarify") {
-          // Reducer routes to uiPhase='clarifying' via the plan event —
-          // questions stay on screen while the composer takes the answer.
-          pendingPlan = { plan, query: cmd.query, mode: cmd.mode, wallStartMs };
-        } else {
-          pendingPlan = { plan, query: cmd.query, mode: cmd.mode, wallStartMs };
+          continue;
+        }
+        const result = yield* runQuery(cmd.query, session, sources, reranker, {
+          ...harnessOpts,
+          reasoningMode: cmd.mode,
+          context: buildPlannerContext(sources),
+          wallStartMs,
+          onStart: () => startRunDir(cmd.query, cmd.mode),
+        });
+        if (result.type === "research_plan") {
+          pendingPlan = {
+            plan: result.plan,
+            query: cmd.query,
+            mode: cmd.mode,
+            wallStartMs,
+          };
           yield* events.send({ type: "ui:plan_review" });
+        } else if (result.type === "clarify") {
+          pendingPlan = {
+            plan: result.plan,
+            query: cmd.query,
+            mode: cmd.mode,
+            wallStartMs,
+          };
+          // Stays in clarifying via the plan event.
+        } else {
+          yield* events.send({ type: "ui:composer" });
         }
       } else if (cmd.type === "submit_clarification" && pendingPlan) {
-        // Re-run the planner with the original query + the prior questions
-        // and the user's answer folded into the context. Sources unchanged.
+        // Re-run the planner with the prior questions and the user's
+        // answer folded into the context. Sources unchanged.
         const {
           query: origQuery,
           plan: priorPlan,
@@ -895,54 +957,47 @@ main(function* () {
           "",
           "Use this exchange to proceed with research if possible.",
         ].join("\n");
-        const plannerContext = [buildPlannerContext(sources), qa]
-          .filter(Boolean)
-          .join("\n\n");
-        yield* events.send({ type: "plan:start", query: origQuery, mode });
-        const plan = yield* runPlanner(origQuery, session, {
+        const result = yield* runQuery(origQuery, session, sources, reranker, {
+          ...harnessOpts,
           reasoningMode: mode,
-          context: plannerContext,
+          context: [buildPlannerContext(sources), qa]
+            .filter(Boolean)
+            .join("\n\n"),
+          wallStartMs,
+          onStart: () => startRunDir(origQuery, mode),
         });
-        if (plan.intent === "passthrough") {
-          startRunDir(origQuery, mode);
-          yield* runPassthroughBranch(origQuery, session, plan, wallStartMs);
+        if (result.type === "research_plan") {
+          pendingPlan = { plan: result.plan, query: origQuery, mode, wallStartMs };
+          yield* events.send({ type: "ui:plan_review" });
+        } else if (result.type === "clarify") {
+          pendingPlan = { plan: result.plan, query: origQuery, mode, wallStartMs };
+        } else {
           pendingPlan = null;
           yield* events.send({ type: "ui:composer" });
-        } else if (plan.intent === "clarify") {
-          pendingPlan = { plan, query: origQuery, mode, wallStartMs };
-          // stays in clarifying via the plan event
-        } else {
-          pendingPlan = { plan, query: origQuery, mode, wallStartMs };
-          yield* events.send({ type: "ui:plan_review" });
         }
       } else if (cmd.type === "change_mode" && pendingPlan) {
         const sources = buildSources(liveConfig);
-        const plannerContext = buildPlannerContext(sources);
-        yield* events.send({
-          type: "plan:start",
-          query: pendingPlan.query,
-          mode: cmd.mode,
-        });
-        const plan = yield* runPlanner(pendingPlan.query, session, {
-          reasoningMode: cmd.mode,
-          context: plannerContext,
-        });
-        if (plan.intent === "passthrough") {
-          startRunDir(pendingPlan.query, cmd.mode);
-          yield* runPassthroughBranch(
-            pendingPlan.query,
-            session,
-            plan,
-            pendingPlan.wallStartMs,
-          );
+        const result = yield* runQuery(
+          pendingPlan.query,
+          session,
+          sources,
+          reranker,
+          {
+            ...harnessOpts,
+            reasoningMode: cmd.mode,
+            context: buildPlannerContext(sources),
+            wallStartMs: pendingPlan.wallStartMs,
+            onStart: () => startRunDir(pendingPlan!.query, cmd.mode),
+          },
+        );
+        if (result.type === "research_plan") {
+          pendingPlan = { ...pendingPlan, plan: result.plan, mode: cmd.mode };
+          yield* events.send({ type: "ui:plan_review" });
+        } else if (result.type === "clarify") {
+          pendingPlan = { ...pendingPlan, plan: result.plan, mode: cmd.mode };
+        } else {
           pendingPlan = null;
           yield* events.send({ type: "ui:composer" });
-        } else if (plan.intent === "clarify") {
-          pendingPlan = { ...pendingPlan, plan, mode: cmd.mode };
-          // stays in clarifying via the plan event
-        } else {
-          pendingPlan = { ...pendingPlan, plan, mode: cmd.mode };
-          yield* events.send({ type: "ui:plan_review" });
         }
       } else if (cmd.type === "accept_plan" && pendingPlan) {
         if (pendingPlan.plan.intent === "clarify") {
@@ -960,7 +1015,7 @@ main(function* () {
           continue;
         }
         startRunDir(pendingPlan.query, pendingPlan.mode);
-        yield* runResearchBranch(
+        yield* runResearchPlan(
           pendingPlan.query,
           pendingPlan.plan,
           session,
@@ -969,8 +1024,8 @@ main(function* () {
           {
             ...harnessOpts,
             reasoningMode: pendingPlan.mode,
+            wallStartMs: pendingPlan.wallStartMs,
           },
-          pendingPlan.wallStartMs,
         );
         pendingPlan = null;
         yield* events.send({ type: "ui:composer" });

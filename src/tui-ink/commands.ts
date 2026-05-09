@@ -10,7 +10,7 @@
  */
 
 export type Command =
-  | { type: 'submit_query'; query: string; mode: 'flat' | 'deep' }
+  | { type: 'submit_query'; query: string; mode: 'flat' | 'deep'; skipPlanner?: boolean }
   | { type: 'submit_clarification'; answer: string }
   | { type: 'accept_plan' }
   | { type: 'cancel_plan' }

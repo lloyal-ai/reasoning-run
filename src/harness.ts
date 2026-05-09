@@ -1,3 +1,34 @@
+/**
+ * Harness — pipeline that turns a user query into an answer.
+ *
+ * Two public Operations:
+ *
+ *   runQuery(query, ...)          — runs the planner, dispatches on intent.
+ *                                    Handles passthrough internally; returns
+ *                                    a research plan for callers to route
+ *                                    (plan-review dialog or direct execution).
+ *
+ *   runResearchPlan(query, plan,..) — runs research → maybe-synth → finalize
+ *                                    for an already-vetted plan. Used by the
+ *                                    accept_plan path (after plan-review) and
+ *                                    by the START path (synthetic 1-task plan
+ *                                    bypassing the planner).
+ *
+ * Two structural gates encode invariants, not user-mode flags:
+ *
+ *   1. session.trunk gates the passthrough fast-path. Without a warm trunk
+ *      there's nothing to fork from; the pipeline falls through to research
+ *      transparently. This is what makes first-query START work without any
+ *      special-case — START produces a research plan, falls into Stage 4.
+ *
+ *   2. plan.tasks.length > 1 gates synth. Synth aggregates findings across
+ *      multiple agents into one argument. With a single agent there's
+ *      nothing to aggregate — that agent's report IS the answer. The synth
+ *      prompts also assume multi-agent framing ("findings from N parallel
+ *      research agents"), so running synth on a single source produces
+ *      awkward output.
+ */
+
 import { call } from "effection";
 import type { Operation } from "effection";
 import type { Session, SessionContext } from "@lloyal-labs/sdk";
@@ -16,23 +47,22 @@ import {
 } from "@lloyal-labs/lloyal-agents";
 import type { Source, AgentEvent } from "@lloyal-labs/lloyal-agents";
 import type { StepEvent, OpTiming } from "./tui-ink";
-import { reportTool, PlanTool, taskToContent } from "@lloyal-labs/rig";
+import { reportTool, PlanTool } from "@lloyal-labs/rig";
 import type {
   PlanResult,
-  PlanIntent,
   ResearchTask,
   Reranker,
   Chunk,
   SourceContext,
 } from "@lloyal-labs/rig";
+import { taskToContent } from "@lloyal-labs/rig";
 
 // ── Prompts ─────────────────────────────────────────────────────
 //
 // .eta files are inlined into the published bundle as string constants
-// via esbuild's text loader (see esbuild build script). At dev time tsx
-// honors the same `*.eta` -> string contract via the eta.d.ts ambient
-// declaration. No fs.readFileSync, no shipped prompts/ directory at
-// runtime.
+// via esbuild's text loader. At dev time tsx honors the same `*.eta` ->
+// string contract via the eta.d.ts ambient declaration. No
+// fs.readFileSync, no shipped prompts/ directory at runtime.
 
 import PLAN_RAW from "./prompts/plan.eta";
 import PLAN_FLAT_RAW from "./prompts/plan-flat.eta";
@@ -44,8 +74,6 @@ import CORPUS_WORKER_RAW from "./prompts/corpus-worker.eta";
 import WEB_WORKER_RAW from "./prompts/web-worker.eta";
 import SKILL_CATALOG_RAW from "./prompts/skill-catalog.eta";
 
-/** Split a `system\n---\nuser` prompt source into its halves. Mirrors the
- *  legacy `loadPrompt` shape so consumers don't change. */
 function parsePrompt(raw: string): { system: string; user: string } {
   const trimmed = raw.trim();
   const sep = trimmed.indexOf("\n---\n");
@@ -100,16 +128,33 @@ class SynthPolicy extends DefaultAgentPolicy {
   }
 }
 
-// ── Types ───────────────────────────────────────────────────────
+// ── Public types ────────────────────────────────────────────────
 
 export type QueryResult =
   | { type: "done" }
-  | { type: "clarify"; questions: string[] };
+  | { type: "clarify"; plan: PlanResult }
+  | { type: "research_plan"; plan: PlanResult };
 
 export interface HarnessOpts {
   maxTurns: number;
   findingsMaxChars?: number;
   reasoningMode: "flat" | "deep";
+}
+
+export interface RunQueryOpts extends HarnessOpts {
+  /** Extra context appended to the planner prompt — used to thread
+   *  clarification Q&A back in for re-planning. */
+  context?: string;
+  /** performance.now() at the user's submit. Used as the `wallTimeMs`
+   *  baseline in the `complete` event. */
+  wallStartMs: number;
+  /** Fires after the clarify gate but before passthrough/research starts.
+   *  Used by main.ts to start the run-dir for artifact writes. */
+  onStart?: () => void;
+}
+
+export interface RunResearchPlanOpts extends HarnessOpts {
+  wallStartMs: number;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -138,8 +183,6 @@ function renderWorkerPrompt(
   return FALLBACK.system;
 }
 
-/** Current date as ISO YYYY-MM-DD — threaded into prompts so recency-sensitive
- *  searches anchor on the current year, not the model's training-cutoff default. */
 function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -150,14 +193,28 @@ function startTimer(): () => number {
 }
 
 /**
- * Passthrough handler — stream a direct answer from session.trunk after
- * appending the user's query as a fresh user turn. No research pool runs;
- * the answer comes from the prior Q&A already in trunk's KV via commitTurn.
+ * Synthetic single-task research plan. Used by the START path to
+ * bypass the planner — the user's literal query becomes the only
+ * research task. Combined with the synth gate inside runResearchPlan
+ * (skips synth when tasks.length === 1), this collapses START into
+ * "research the literal query, return the agent's report."
+ */
+export function singleTaskPlan(query: string): PlanResult {
+  return {
+    intent: "research",
+    tasks: [{ description: query }],
+    clarifyQuestions: [],
+    tokenCount: 0,
+    timeMs: 0,
+  };
+}
+
+/**
+ * Passthrough — stream a direct answer from session.trunk after appending
+ * the user's query as a fresh user turn. No research pool runs; the
+ * answer comes from the prior Q&A already in trunk's KV.
  *
- * The trunk's KV already contains the prior conversation (system prompt,
- * tool schemas, earlier user+assistant pairs). We append the new user turn,
- * then iterate produceSync+commit until stop. Finally session.commitTurn
- * persists the full query+answer pair for the next follow-up.
+ * Caller ensures session.trunk exists; this throws otherwise.
  */
 function* runPassthrough(
   query: string,
@@ -165,9 +222,7 @@ function* runPassthrough(
 ): Operation<{ answer: string; tokenCount: number; timeMs: number }> {
   const trunk = session.trunk;
   if (!trunk) {
-    throw new Error(
-      "runPassthrough: session has no trunk — passthrough requires a warm session",
-    );
+    throw new Error("runPassthrough: session has no trunk");
   }
 
   const ctx: SessionContext = yield* Ctx.expect();
@@ -192,24 +247,14 @@ function* runPassthrough(
   return { answer: pieces.join(""), tokenCount, timeMs: performance.now() - t };
 }
 
-// ── Entry points ────────────────────────────────────────────────
-
-export interface PlannerOpts {
-  reasoningMode: "flat" | "deep";
-  /** Optional extra context (e.g. clarification response) threaded into
-   *  the planner prompt. Appended under "Today's date: …". */
-  context?: string;
-}
-
 /**
- * Run the planner. Emits a `query` event and a `plan` event. Returns the
- * raw PlanResult so callers can route based on intent (main.ts drives a
- * plan-review dialog in TTY mode; handleQuery dispatches automatically).
+ * Run the planner LLM. Emits a `query` event and a `plan` event.
+ * Returns the raw PlanResult so callers can route based on intent.
  */
 export function* runPlanner(
   query: string,
   session: Session,
-  opts: PlannerOpts,
+  opts: { reasoningMode: "flat" | "deep"; context?: string },
 ): Operation<PlanResult> {
   const events = yield* Events.expect();
   const send = (ev: StepEvent): Operation<void> =>
@@ -244,86 +289,103 @@ export function* runPlanner(
   return plan;
 }
 
+// ── Pipeline ────────────────────────────────────────────────────
+
 /**
- * Direct-answer branch (passthrough intent): stream the response from the
- * warm trunk. Emits `answer`, `stats`, `complete`.
+ * Top of pipeline: run planner, dispatch on intent.
+ *
+ *   - intent='clarify'      → return; caller drives the clarify dialog
+ *   - intent='passthrough'  → run passthrough inline (if trunk exists),
+ *                             return done. If no trunk, fall through to
+ *                             research_plan with a single-task synthetic
+ *                             plan since passthrough requires a warm
+ *                             session.
+ *   - intent='research'     → return the plan; caller decides whether to
+ *                             show plan-review or run it directly.
+ *
+ * For START (skip planner): main.ts builds a singleTaskPlan(query) and
+ * calls runResearchPlan directly — never enters this function.
  */
-export function* runPassthroughBranch(
+export function* runQuery(
   query: string,
   session: Session,
-  plan: PlanResult,
-  wallStartMs: number,
-): Operation<void> {
+  sources: Source<SourceContext, Chunk>[],
+  reranker: Reranker,
+  opts: RunQueryOpts,
+): Operation<QueryResult> {
   const events = yield* Events.expect();
   const send = (ev: StepEvent): Operation<void> =>
     events.send(ev as unknown as AgentEvent);
 
-  const pt = yield* runPassthrough(query, session);
-  yield* send({ type: "answer", text: pt.answer });
+  yield* send({
+    type: "plan:start",
+    query,
+    mode: opts.reasoningMode,
+  });
 
-  const ctx: SessionContext = yield* Ctx.expect();
-  const p = ctx._storeKvPressure();
-  const ctxTotal = p.nCtx || 1;
-  yield* send({
-    type: "stats",
-    timings: [
-      {
-        label: "Plan",
-        tokens: plan.tokenCount,
-        detail: plan.intent,
-        timeMs: plan.timeMs,
-      },
-      {
-        label: "Passthrough",
-        tokens: pt.tokenCount,
-        detail: "trunk stream",
-        timeMs: pt.timeMs,
-      },
-    ],
-    ctxPct: Math.round((100 * p.cellsUsed) / ctxTotal),
-    ctxPos: p.cellsUsed,
-    ctxTotal,
+  const plan = yield* runPlanner(query, session, {
+    reasoningMode: opts.reasoningMode,
+    context: opts.context,
   });
-  yield* send({
-    type: "complete",
-    data: {
-      intent: plan.intent,
-      planTokens: plan.tokenCount,
-      passthroughTokens: pt.tokenCount,
-      wallTimeMs: Math.round(performance.now() - wallStartMs),
-      planMs: Math.round(plan.timeMs),
-      passthroughMs: Math.round(pt.timeMs),
-    },
-  });
-  // NOTE: we do NOT call session.commitTurn here. The trunk already contains
-  // the streamed user+assistant pair from produceSync+commit.
+
+  if (plan.intent === "clarify") {
+    return { type: "clarify", plan };
+  }
+
+  // Passthrough fast-path. Gated on trunk existence: passthrough forks
+  // from the warm spine, so a cold session can't take it. Without trunk
+  // we degrade to running the query as a single-task research plan,
+  // which transparently gives the user an answer either way.
+  if (plan.intent === "passthrough") {
+    if (!session.trunk) {
+      const fallbackPlan = singleTaskPlan(query);
+      opts.onStart?.();
+      yield* runResearchPlan(query, fallbackPlan, session, sources, reranker, {
+        ...opts,
+      });
+      return { type: "done" };
+    }
+    opts.onStart?.();
+    const pt = yield* runPassthrough(query, session);
+    yield* send({ type: "answer", text: pt.answer });
+    yield* finalizePassthrough(plan, pt, opts.wallStartMs);
+    return { type: "done" };
+  }
+
+  return { type: "research_plan", plan };
 }
 
 /**
- * Research branch: spawns research agents, runs synth, and
- * commits the warm spine. Emits the full research→complete event sequence.
+ * Run a research plan to completion: research pool → (synth iff fan-in)
+ * → answer + stats + complete + commitTurn.
  *
- * Safe to call directly from main.ts after a plan-review dialog confirms
- * the plan; handleQuery also composes this for the JSONL path.
+ * Used for both:
+ *   - accept_plan path: planner-built plan, possibly edited via the
+ *     plan-review dialog
+ *   - START path: synthetic singleTaskPlan(query) bypassing the planner
+ *
+ * Synth gate (single conditional, encodes invariant): synth aggregates
+ * findings across multiple agents into one argument. tasks.length === 1
+ * has nothing to aggregate — the agent's report IS the answer.
  */
-export function* runResearchBranch(
+export function* runResearchPlan(
   query: string,
   plan: PlanResult,
   session: Session,
   sources: Source<SourceContext, Chunk>[],
   reranker: Reranker,
-  opts: HarnessOpts,
-  wallStartMs: number,
+  opts: RunResearchPlanOpts,
 ): Operation<void> {
+  if (plan.intent !== "research") {
+    throw new Error(
+      `runResearchPlan: expected plan.intent=research, got ${plan.intent}`,
+    );
+  }
+
   const events = yield* Events.expect();
   const send = (ev: StepEvent): Operation<void> =>
     events.send(ev as unknown as AgentEvent);
 
-  if (plan.intent !== "research") {
-    throw new Error(
-      `runResearchBranch: expected plan.intent=research, got ${plan.intent}`,
-    );
-  }
   const tasks = plan.tasks;
   const currentDate = today();
 
@@ -336,14 +398,10 @@ export function* runResearchBranch(
 
   for (const source of sources) yield* source.bind({ reranker });
   const scorers = new Map(sources.map((s) => [s, s.createScorer(query)]));
-
   const allDataTools = sources.flatMap((s) => s.tools);
   const primarySource = sources[0];
   const primaryScorer = scorers.get(primarySource)!;
 
-  // Detect enabled sources for the skill catalog. Web is identified by name;
-  // corpus is identified by the presence of a promptData() method (matches
-  // renderWorkerPrompt's routing).
   const hasWeb = sources.some((s) => s.name === "web");
   const hasCorpus = sources.some(
     (s) =>
@@ -370,24 +428,16 @@ export function* runResearchBranch(
     totalToolCalls: number;
     synthTokens: number;
   }>(
-    // Skill catalog + tools live on queryRoot (the harness-owned shared
-    // root) so chain extensions (extendRoot) accumulate on the SAME root
-    // synth forks from later. Putting systemPrompt on agentPool would
-    // route the spine onto agentPool's transient nested root, which gets
-    // pruned at pool exit — synth would fork an empty queryRoot.
     {
       parent: session.trunk ?? undefined,
       systemPrompt: skillCatalog,
       toolsJson: researchToolkit.toolsJson,
     },
     function* (queryRoot) {
-      // Emit fanout:tasks once upfront for flat mode so the TUI frames the
-      // section with the task list before agents start streaming.
       if (opts.reasoningMode === "flat") {
-        yield* send({ type: "fanout:tasks", tasks: tasks });
+        yield* send({ type: "fanout:tasks", tasks });
       }
 
-      // ── Research: chain (deep) or parallel-with-extend (flat) ─────
       const research = yield* agentPool({
         tools: [...allDataTools, reportTool],
         parent: queryRoot,
@@ -399,14 +449,8 @@ export function* runResearchBranch(
         enableThinking: true,
         orchestrate:
           opts.reasoningMode === "flat"
-            ? // Flat: pure parallel — agents run concurrently and independently.
-              // No spine extension (findings reach synth via prompt injection,
-              // not KV attention). `taskIndex: 0` keeps web-worker.eta's
-              // BUILD_ON_PRIOR block off (no priors in parallel); `siblingTasks`
-              // + `agentCount > 1` activates sibling awareness so each agent
-              // stays in its lane.
-              parallel(
-                tasks.map((task, i) => ({
+            ? parallel(
+                tasks.map((task: ResearchTask, i: number) => ({
                   content: taskToContent(task),
                   systemPrompt: renderWorkerPrompt(primarySource, {
                     maxTurns: opts.maxTurns,
@@ -420,8 +464,7 @@ export function* runResearchBranch(
                   seed: 1000 + i,
                 })),
               )
-            : // Deep: chain-shaped spine that extends between each task.
-              chain(tasks, (task, i) => ({
+            : chain(tasks, (task: ResearchTask, i: number) => ({
                 task: {
                   content: taskToContent(task),
                   systemPrompt: renderWorkerPrompt(primarySource, {
@@ -446,7 +489,7 @@ export function* runResearchBranch(
                     source: primarySource.name,
                   });
                 },
-                afterExtend: function* (delta, position) {
+                afterExtend: function* (delta: number, position: number) {
                   yield* send({
                     type: "spine:task:done",
                     taskIndex: i,
@@ -459,9 +502,7 @@ export function* runResearchBranch(
 
       // Emit research:done HERE — before synth starts — so the flat-mode
       // panel's finalize happens while the cursor is still directly below
-      // the panel. If we emit it outside the withSharedRoot body (after
-      // synth has streamed 100+ lines), panel.finish's cursor-up lands
-      // mid-synth and overwrites a chunk of the synthesis output.
+      // the panel.
       researchTimeMs = researchTimer();
       yield* send({
         type: "research:done",
@@ -470,16 +511,20 @@ export function* runResearchBranch(
         timeMs: researchTimeMs,
       });
 
-      // ── Synthesis ────────────────────────────────────────────
-      // Deep: synth forks from queryRoot where chain's extendRoot has
-      // accumulated findings as conversation turns. SYNTHESIZE_DEEP reads
-      // them from prior turns via KV attention.
-      //
-      // Flat: no spine extension happened (parallel agents are independent);
-      // findings are concatenated into a single text block and injected
-      // into SYNTHESIZE_FLAT's user prompt. Synth still forks from queryRoot
-      // (which carries only session context, if any), but its task prompt
-      // carries the fan-in directly.
+      // Synth gate. Synth aggregates fan-in across multiple sources;
+      // single-task runs have nothing to aggregate — the agent's
+      // report IS the answer. The synth prompts also assume multi-agent
+      // framing, so running them on a single source produces awkward
+      // output. Skipping saves ~120s of LLM time on START runs.
+      if (tasks.length === 1) {
+        return {
+          answer: research.agents[0]?.result?.trim() ?? "",
+          totalTokens: research.totalTokens,
+          totalToolCalls: research.totalToolCalls,
+          synthTokens: 0,
+        };
+      }
+
       yield* send({ type: "synthesize:start" });
       const synthT = startTimer();
 
@@ -501,10 +546,6 @@ export function* runResearchBranch(
         agentCount: tasks.length,
       };
 
-      // Synth has no tools — its entire output IS the report. EOG is the
-      // terminal signal; SynthPolicy maps the streamed content directly to
-      // agent.result via the `free_text_report` path. No JSON-in-JSON
-      // tool-call wrapping → no escape failures, no truncated wrappers.
       const synth = yield* useAgent({
         systemPrompt: renderTemplate(synthPrompt.system, synthCtx),
         task: renderTemplate(synthPrompt.user, synthCtx),
@@ -514,13 +555,9 @@ export function* runResearchBranch(
       });
 
       synthTimeMs = synthT();
-      const synthAnswer = synth.result || "";
       yield* send({
         type: "synthesize:done",
         agentId: synth.id,
-        // Defensive: recovery (end-of-pool scratchpad extraction for
-        // free-text-stop agents) prunes the branch at agent-pool.ts:269.
-        // Matches the pattern in AgentPoolResult construction.
         ppl: synth.branch.disposed ? 0 : synth.branch.perplexity,
         tokenCount: synth.tokenCount,
         toolCallCount: synth.toolCallCount,
@@ -528,7 +565,7 @@ export function* runResearchBranch(
       });
 
       return {
-        answer: synthAnswer,
+        answer: synth.result || "",
         totalTokens: research.totalTokens,
         totalToolCalls: research.totalToolCalls,
         synthTokens: synth.tokenCount,
@@ -536,16 +573,34 @@ export function* runResearchBranch(
     },
   );
 
-  // research:done already fired inside the withSharedRoot body (before synth)
-  // so the flat-mode panel's finalize landed at the right cursor position.
   yield* send({ type: "answer", text: answer });
-
-  // ── Commit warm spine ─────────────────────────────────────
   if (answer) yield* call(() => session.commitTurn(query, answer));
 
-  // ── Stats ─────────────────────────────────────────────────
-  const statsCtx: SessionContext = yield* Ctx.expect();
-  const p = statsCtx._storeKvPressure();
+  yield* finalizeResearch({
+    plan,
+    researchTokens: researchTotalTokens,
+    researchToolCalls: researchTotalToolCalls,
+    researchTimeMs,
+    synthTokens: synthTotalTokens,
+    synthTimeMs,
+    wallStartMs: opts.wallStartMs,
+    send,
+  });
+}
+
+// ── Finalize helpers ────────────────────────────────────────────
+
+function* finalizePassthrough(
+  plan: PlanResult,
+  pt: { tokenCount: number; timeMs: number },
+  wallStartMs: number,
+): Operation<void> {
+  const events = yield* Events.expect();
+  const send = (ev: StepEvent): Operation<void> =>
+    events.send(ev as unknown as AgentEvent);
+
+  const ctx: SessionContext = yield* Ctx.expect();
+  const p = ctx._storeKvPressure();
   const ctxTotal = p.nCtx || 1;
 
   const timings: OpTiming[] = [
@@ -556,19 +611,12 @@ export function* runResearchBranch(
       timeMs: plan.timeMs,
     },
     {
-      label: "Research",
-      tokens: researchTotalTokens,
-      detail: `${researchTotalToolCalls} tools`,
-      timeMs: researchTimeMs,
-    },
-    {
-      label: "Synthesize",
-      tokens: synthTotalTokens,
-      detail: "spine fork",
-      timeMs: synthTimeMs,
+      label: "Passthrough",
+      tokens: pt.tokenCount,
+      detail: "trunk stream",
+      timeMs: pt.timeMs,
     },
   ];
-
   yield* send({
     type: "stats",
     timings,
@@ -576,57 +624,77 @@ export function* runResearchBranch(
     ctxPos: p.cellsUsed,
     ctxTotal,
   });
-
   yield* send({
     type: "complete",
     data: {
       intent: plan.intent,
       planTokens: plan.tokenCount,
-      agentTokens: researchTotalTokens,
-      synthTokens: synthTotalTokens,
-      totalToolCalls: researchTotalToolCalls,
-      agentCount: tasks.length,
+      passthroughTokens: pt.tokenCount,
       wallTimeMs: Math.round(performance.now() - wallStartMs),
       planMs: Math.round(plan.timeMs),
-      researchMs: Math.round(researchTimeMs),
-      synthMs: Math.round(synthTimeMs),
+      passthroughMs: Math.round(pt.timeMs),
     },
   });
+  // Trunk already contains the streamed user+assistant pair via
+  // produceSync+commit; no session.commitTurn needed.
 }
 
-/**
- * End-to-end composer used by the non-TTY / JSONL path. The TTY path in
- * main.ts drives runPlanner → plan-review dialog → runResearchBranch
- * directly so the user can review the plan before committing.
- */
-export function* handleQuery(
-  query: string,
-  session: Session,
-  sources: Source<SourceContext, Chunk>[],
-  reranker: Reranker,
-  opts: HarnessOpts,
-  context?: string,
-): Operation<QueryResult> {
-  const wallStartMs = performance.now();
-  const plan = yield* runPlanner(query, session, {
-    reasoningMode: opts.reasoningMode,
-    context,
+function* finalizeResearch(args: {
+  plan: PlanResult;
+  researchTokens: number;
+  researchToolCalls: number;
+  researchTimeMs: number;
+  synthTokens: number;
+  synthTimeMs: number;
+  wallStartMs: number;
+  send: (ev: StepEvent) => Operation<void>;
+}): Operation<void> {
+  const ctx: SessionContext = yield* Ctx.expect();
+  const p = ctx._storeKvPressure();
+  const ctxTotal = p.nCtx || 1;
+
+  const timings: OpTiming[] = [
+    {
+      label: "Plan",
+      tokens: args.plan.tokenCount,
+      detail: args.plan.intent,
+      timeMs: args.plan.timeMs,
+    },
+    {
+      label: "Research",
+      tokens: args.researchTokens,
+      detail: `${args.researchToolCalls} tools`,
+      timeMs: args.researchTimeMs,
+    },
+    {
+      label: "Synthesize",
+      tokens: args.synthTokens,
+      detail: args.synthTokens > 0 ? "spine fork" : "skipped (single task)",
+      timeMs: args.synthTimeMs,
+    },
+  ];
+
+  yield* args.send({
+    type: "stats",
+    timings,
+    ctxPct: Math.round((100 * p.cellsUsed) / ctxTotal),
+    ctxPos: p.cellsUsed,
+    ctxTotal,
   });
-  if (plan.intent === "clarify") {
-    return { type: "clarify", questions: plan.clarifyQuestions };
-  }
-  if (plan.intent === "passthrough") {
-    yield* runPassthroughBranch(query, session, plan, wallStartMs);
-    return { type: "done" };
-  }
-  yield* runResearchBranch(
-    query,
-    plan,
-    session,
-    sources,
-    reranker,
-    opts,
-    wallStartMs,
-  );
-  return { type: "done" };
+
+  yield* args.send({
+    type: "complete",
+    data: {
+      intent: args.plan.intent,
+      planTokens: args.plan.tokenCount,
+      agentTokens: args.researchTokens,
+      synthTokens: args.synthTokens,
+      totalToolCalls: args.researchToolCalls,
+      agentCount: args.plan.tasks.length,
+      wallTimeMs: Math.round(performance.now() - args.wallStartMs),
+      planMs: Math.round(args.plan.timeMs),
+      researchMs: Math.round(args.researchTimeMs),
+      synthMs: Math.round(args.synthTimeMs),
+    },
+  });
 }

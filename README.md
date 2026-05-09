@@ -50,7 +50,7 @@ Type `/` in the composer to open the command palette. Tab autocompletes; Enter r
 | `/model <path>` | Use a local LLM `.gguf` instead of the catalog default. |
 | `/reranker <path>` | Use a local reranker `.gguf` instead of the catalog default. |
 | `/deep` | Switch to deep (chain) reasoning mode. |
-| `/fast` | Switch to fast (parallel) reasoning mode. |
+| `/flat` | Switch to flat (parallel) reasoning mode. |
 | `/help` | Show the command list inline. |
 | `/quit` | Exit. |
 

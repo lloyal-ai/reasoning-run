@@ -36,7 +36,7 @@ check('load: missing file → defaults', () => {
     {},
   );
   assert.equal(loadedFromFile, false);
-  assert.equal(config.defaults.reasoningMode, 'deep');
+  assert.equal(config.defaults.reasoningMode, 'flat');
   assert.equal(config.sources.tavilyKey, undefined);
   assert.equal(origin.tavilyKey, 'unset');
   assert.equal(origin.reasoningMode, 'default');

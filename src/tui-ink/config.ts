@@ -91,7 +91,7 @@ function builtinDefaults(): Config {
     version: 1,
     sources: {},
     defaults: {
-      reasoningMode: 'deep',
+      reasoningMode: 'flat',
       maxTurns: 10,
     },
     model: {},
@@ -146,7 +146,7 @@ export function loadConfig(
   const rawOutputDir = cli.outputDir ?? base.sources.outputDir;
   const outputDir = rawOutputDir ? resolvePath(rawOutputDir) : undefined;
   const reasoningMode =
-    cli.reasoningMode ?? base.defaults.reasoningMode ?? 'deep';
+    cli.reasoningMode ?? base.defaults.reasoningMode ?? 'flat';
   const rawModelPath = cli.modelPath ?? base.model.path;
   const modelPath = rawModelPath ? resolvePath(rawModelPath) : undefined;
   const reranker = cli.reranker ?? base.model.reranker;
