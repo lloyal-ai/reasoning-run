@@ -1,7 +1,8 @@
-import React, { memo } from 'react';
+import React, { memo, useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import type { AgentRuntime, TimelineItem } from '../state';
 import { colorForLabel } from '../colors';
+import { SPINNER_FRAMES, SPINNER_TICK_MS } from '../spinner-frames';
 
 export interface ColumnProps {
   agent: AgentRuntime;
@@ -75,12 +76,34 @@ function stripFirstLineIfTitle(body: string): string {
 
 export const ToolCallItem = memo(function ToolCallItem({
   item,
+  pending = false,
 }: {
   item: Extract<TimelineItem, { kind: 'tool_call' }>;
+  /** True while the agent is awaiting this tool's result. Drives a
+   *  spinner in place of the static glyph. Defaults to false so
+   *  FrozenAgentPanel (which renders only completed agents) doesn't
+   *  need to pass it. */
+  pending?: boolean;
 }): React.ReactElement {
+  // Inline spinner state — same pattern as PlanningSpinner.tsx. The
+  // interval only runs while pending, then cleans up on tool_result.
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    if (!pending) return;
+    const id = setInterval(
+      () => setFrame((f) => (f + 1) % SPINNER_FRAMES.length),
+      SPINNER_TICK_MS,
+    );
+    return () => clearInterval(id);
+  }, [pending]);
+
   return (
     <Box flexShrink={0}>
-      <Text dimColor>› </Text>
+      {pending ? (
+        <Text color="cyan">{SPINNER_FRAMES[frame]} </Text>
+      ) : (
+        <Text dimColor>› </Text>
+      )}
       <Text color="cyan">{item.tool}</Text>
       {item.argsSummary ? <Text dimColor>  {item.argsSummary}</Text> : null}
     </Box>
@@ -177,24 +200,18 @@ export const Column = memo(function Column({
   const color = colorForLabel(agent.label);
   const active = isActive(agent);
 
-  const descText = agent.taskDescription
-    ? (agent.taskDescription.length > 80
-        ? agent.taskDescription.slice(0, 80) + '…'
-        : agent.taskDescription)
-    : null;
+  const descText = agent.taskDescription ?? null;
 
   // Outer column: fixed total height so the narrative row doesn't jitter
   // as content streams. overflow="hidden" honors the measured height via
   // Yoga + Ink's renderer.
-  const totalHeight = bodyHeight + HEADER_ROWS + 2; // +2 for borders
+  const totalHeight = bodyHeight + HEADER_ROWS;
 
   return (
     <Box
       flexDirection="column"
       width={width}
       height={totalHeight}
-      borderStyle="round"
-      borderColor={active ? color : 'gray'}
       paddingX={1}
       marginRight={1}
       flexShrink={0}
@@ -228,7 +245,13 @@ export const Column = memo(function Column({
             return <ThinkItem key={item.id} item={item} color={color} />;
           }
           if (item.kind === 'tool_call') {
-            return <ToolCallItem key={item.id} item={item} />;
+            return (
+              <ToolCallItem
+                key={item.id}
+                item={item}
+                pending={agent.pendingToolCallId === item.id}
+              />
+            );
           }
           if (item.kind === 'tool_result') {
             return <ToolResultItem key={item.id} item={item} />;
