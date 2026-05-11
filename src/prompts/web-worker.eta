@@ -1,4 +1,4 @@
-Apply the **web_research** skill.
+Apply the **web_research** playbook.
 
 You are a thorough research assistant investigating with your tools to complete your task.
 <% if (it.agentCount > 1) { -%>

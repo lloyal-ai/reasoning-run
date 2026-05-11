@@ -347,11 +347,6 @@ const errorStack = (err: unknown): string =>
 // ── Main ─────────────────────────────────────────────────────────
 
 main(function* () {
-  const modelName = path.basename(modelPath).replace(/-Q\w+\.gguf$/, "");
-  const rerankName = path
-    .basename(rerankModelPath)
-    .replace(/-q\w+\.gguf$/i, "");
-
   const useInk = isTTY && !jsonlMode;
 
   // Pre-boot logs only in non-Ink mode — Ink mounts ASAP in TTY mode and
@@ -368,6 +363,12 @@ main(function* () {
   // can push directly.
   const uiChannel: EventBus<WorkflowEvent> = createBus<WorkflowEvent>();
   const commands = createSignal<Command, void>();
+
+  // CLI overrides for model paths get nulled when the user picks a path via
+  // /model or /reranker — otherwise the CLI flag would clobber the user's
+  // explicit slash choice on the next restart iteration.
+  let cliModelOverride: string | undefined = cliModelPath;
+  let cliRerankerOverride: string | undefined = flags.reranker;
 
   // Compute initial download plan synchronously so it can be bootstrapped
   // alongside config:loaded. Reasoning: if we send download:plan via the bus
@@ -415,11 +416,34 @@ main(function* () {
     });
   }
 
-  // ── Downloads + weights load (with /model recovery loop) ──────
-  // Retryable: any failure (HF 404, network, invalid local file, etc.)
-  // emits boot:error → BootStatus renders the error in Ink (NOT stderr)
-  // → user types /model <path> or /quit → loop retries with the new path
-  // or exits cleanly. Avoids the stderr-during-render crash UX.
+  // ── Session-scoped trace ──────────────────────────────────────
+  // One trace.jsonl per process invocation — survives /model and /reranker
+  // restarts. Stays in the outer scope so the file handle isn't recreated
+  // per iteration.
+  const sessionOutputDir = resolvePath(
+    liveConfig.sources.outputDir || process.cwd(),
+  );
+  fs.mkdirSync(sessionOutputDir, { recursive: true });
+  const sessionTraceTs = new Date()
+    .toISOString()
+    .replace(/[:.]/g, "-")
+    .replace("Z", "");
+  const sessionTracePath = path.join(
+    sessionOutputDir,
+    `trace-${sessionTraceTs}.jsonl`,
+  );
+  const sessionTraceFd = fs.openSync(sessionTracePath, "w");
+  const traceWriter = new JsonlTraceWriter(sessionTraceFd);
+  yield* ensure(() => {
+    traceWriter.flush();
+    try {
+      fs.closeSync(sessionTraceFd);
+    } catch {
+      /* non-fatal */
+    }
+  });
+
+  // ── Boot helpers (close over uiChannel, commands) ─────────────
 
   function* ensureFile(
     r: { path: string; entry: ModelCatalogEntry | null },
@@ -455,10 +479,6 @@ main(function* () {
     return r.path;
   }
 
-  /** Inspect the resolved set, emit `download:plan` for any entries that
-   *  will need fetching. Sent once before the ensureFile loop so the UI
-   *  can render a stable two-line tree from the moment any download
-   *  begins (instead of growing mid-stream when reranker starts). */
   function planDownloads(
     rs: ({ path: string; entry: ModelCatalogEntry | null })[],
   ): void {
@@ -474,9 +494,6 @@ main(function* () {
     }
   }
 
-  /** Drain `commands` until we see one of the recovery commands. Other
-   *  commands during boot recovery are ignored — the user has only three
-   *  meaningful actions at this point. */
   function* awaitBootRecovery(): Operation<
     | { type: "set_model_path"; path: string }
     | { type: "set_reranker_path"; path: string }
@@ -496,92 +513,26 @@ main(function* () {
     return { type: "quit" };
   }
 
-  let llmResolvedNow = llmResolved;
-  let modelPathNow = modelPath;
-  let modelNameNow = modelName;
-  let rerankerResolvedNow = rerankerResolved;
-  let rerankModelPathNow = rerankModelPath;
-  let rerankNameNow = rerankName;
+  // ── Per-session restart loop ──────────────────────────────────
+  // Each iteration spawns a child task that owns ctx, reranker, the agent
+  // event-forwarder, and the command loop. Returning "restart" from the
+  // command loop (after /model or /reranker save) ends the spawned task —
+  // structured concurrency tears down everything in that scope (reranker
+  // dispose, ctx dispose, forwarder halt) before the next iteration starts.
+  // Returning "quit" exits main(), unwinding Ink and the trace file too.
+  //
+  // Ink stays mounted across restarts: the user sees the same alt-screen
+  // re-enter the load phase as if it were a fresh boot, no terminal flash.
 
-  let ctx: SessionContext | null = null;
-  let reranker: Reranker | null = null;
-
-  // First iteration uses the bootstrapped plan (no bus emit needed).
-  // Subsequent iterations (after /model or /reranker recovery) re-plan via
-  // the bus since paths may have changed.
-  let firstBootIteration = true;
-
-  while (ctx === null || reranker === null) {
-    // `lastFailedKind` is set BEFORE each step so the catch can attribute
-    // the failure to the right component without unwinding through an
-    // intermediate try/catch per step.
-    let lastFailedKind: "llm" | "reranker" = "llm";
-    try {
-      if (!firstBootIteration) {
-        planDownloads([llmResolvedNow, rerankerResolvedNow]);
-      }
-      firstBootIteration = false;
-
-      lastFailedKind = "llm";
-      yield* ensureFile(llmResolvedNow);
-
-      lastFailedKind = "reranker";
-      yield* ensureFile(rerankerResolvedNow);
-
-      lastFailedKind = "llm";
-      uiChannel.send({ type: "weights:start", label: `Loading ${modelNameNow}…` });
-      ctx = yield* call(() =>
-        createContext({
-          modelPath: modelPathNow,
-          nCtx,
-          nSeqMax: 64,
-          typeK: "q4_0",
-          typeV: "q4_0",
-        }),
-      );
-
-      lastFailedKind = "reranker";
-      uiChannel.send({ type: "weights:label", label: `Loading ${rerankNameNow}…` });
-      reranker = yield* call(() =>
-        createReranker(rerankModelPathNow, { nSeqMax: 8, nCtx: 16384 }),
-      );
-    } catch (err) {
-      // Tear down anything that loaded. createContext succeeding then
-      // createReranker failing leaves ctx alive — must dispose so the
-      // retry doesn't double-load.
-      if (ctx) {
-        try { ctx.dispose?.(); } catch { /* best-effort */ }
-        ctx = null;
-      }
-      reranker = null;
-      uiChannel.send({
-        type: "boot:error",
-        kind: lastFailedKind,
-        message: errorMessage(err),
-      });
-      const cmd = yield* awaitBootRecovery();
-      if (cmd.type === "quit") {
-        inkInstance?.unmount();
-        process.exit(0);
-      }
-      if (cmd.type === "set_model_path") {
-        saveConfig({ model: { path: cmd.path } }, configPath);
-        llmResolvedNow = resolveModelPath(cmd.path, "llm");
-        modelPathNow = llmResolvedNow.path;
-        modelNameNow =
-          llmResolvedNow.entry?.label ?? path.basename(modelPathNow);
-      } else {
-        // set_reranker_path
-        saveConfig({ model: { reranker: cmd.path } }, configPath);
-        rerankerResolvedNow = resolveModelPath(cmd.path, "reranker");
-        rerankModelPathNow = rerankerResolvedNow.path;
-        rerankNameNow =
-          rerankerResolvedNow.entry?.label ?? path.basename(rerankModelPathNow);
-      }
+  let iteration = 0;
+  while (true) {
+    // On restart, re-load config (picks up the /model write the running-loop
+    // handler just persisted) and refresh Ink so the new model name shows
+    // during the next load phase.
+    if (iteration > 0) {
       const reloaded = loadConfig(configPath, {
-        modelPath: cmd.type === "set_model_path" ? cmd.path : cliModelPath,
-        reranker:
-          cmd.type === "set_reranker_path" ? cmd.path : flags.reranker,
+        modelPath: cliModelOverride,
+        reranker: cliRerankerOverride,
         corpusPath: flags.corpus,
         reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
         outputDir: cliOutputDir,
@@ -589,519 +540,621 @@ main(function* () {
       });
       liveConfig = reloaded.config;
       liveOrigin = reloaded.origin;
-    }
-  }
-  yield* ensure(() => {
-    reranker!.dispose();
-  });
-  uiChannel.send({ type: "weights:done" });
-
-  // ── Session + event forwarding ─────────────────────────────
-  // Session-scoped trace: one trace.jsonl per process invocation, captures
-  // every query (including warm follow-ups) in one file. Always-on; the
-  // file is created upfront under the user's output-dir.
-  const sessionOutputDir = resolvePath(
-    liveConfig.sources.outputDir || process.cwd(),
-  );
-  fs.mkdirSync(sessionOutputDir, { recursive: true });
-  const sessionTraceTs = new Date()
-    .toISOString()
-    .replace(/[:.]/g, "-")
-    .replace("Z", "");
-  const sessionTracePath = path.join(
-    sessionOutputDir,
-    `trace-${sessionTraceTs}.jsonl`,
-  );
-  const sessionTraceFd = fs.openSync(sessionTracePath, "w");
-  const traceWriter = new JsonlTraceWriter(sessionTraceFd);
-  yield* ensure(() => {
-    traceWriter.flush();
-    try {
-      fs.closeSync(sessionTraceFd);
-    } catch {
-      /* non-fatal */
-    }
-  });
-
-  const runDirSink = new RunDirSink();
-
-  const { session, events } = yield* initAgents<WorkflowEvent>(ctx, {
-    traceWriter,
-  });
-
-  // Forward all runtime events: per-query artifact sink first, then UI.
-  yield* spawn(function* () {
-    for (const ev of yield* each(events)) {
-      runDirSink.handle(ev as WorkflowEvent);
-      uiChannel.send(ev as WorkflowEvent);
-      yield* each.next();
-    }
-  });
-
-  // Eager corpus indexing — runs during the 'loading' phase so the user
-  // sees per-file progress in the boot status line. Avoids a silent
-  // 30-second-to-minutes pause on the first query when the corpus has
-  // hundreds of files (recursive **/*.{md,mdx} walk).
-  //
-  // Tolerate failure: a stale harness.json with a no-longer-valid
-  // corpusPath (dir deleted, drive unmounted, etc.) must NOT crash boot.
-  // Surface as a toast and continue — user can /scan a new path or clear
-  // via empty value. Boot completes either way.
-  if (liveConfig.sources.corpusPath) {
-    try {
-      const indexed = yield* indexCorpus(
-        liveConfig.sources.corpusPath,
-        uiChannel,
-      );
+      // Use config:loaded (no toast) — the save toast already fired in the
+      // prior iteration's set_model_path / set_reranker_path handler.
       uiChannel.send({
-        type: "corpus:indexed",
-        corpusPath: liveConfig.sources.corpusPath,
-        fileCount: indexed.resources.length,
-        chunkCount: indexed.chunks.length,
+        type: "config:loaded",
+        config: liveConfig,
+        origin: liveOrigin,
+        path: reloaded.path,
       });
-    } catch (err) {
-      uiChannel.send({
-        type: "ui:error",
-        message: `Corpus disabled: ${(err as Error).message}. Use /scan to fix.`,
-      });
+      // Re-plan downloads so the reducer transitions out of 'composer' into
+      // a load phase. If nothing needs downloading, weights:start (inside
+      // the boot loop) is the transition.
+      const llmNext = resolveModelPath(liveConfig.model.path, "llm");
+      const rerNext = resolveModelPath(liveConfig.model.reranker, "reranker");
+      planDownloads([llmNext, rerNext]);
     }
-  }
 
-  // Transition reducer out of 'loading' into 'composer'. (config:loaded was
-  // already in the bootstrap; this nudges uiPhase now that boot is complete.)
-  uiChannel.send({ type: "ui:composer" });
+    const iterCaptured = iteration;
+    const task = yield* spawn(function* (): Operation<"quit" | "restart"> {
+      // Resolve paths fresh — picks up any harness.json changes from a
+      // prior /model write. modelName/rerankName fall back to basename
+      // when there's no catalog entry (raw path).
+      let llmResolvedNow = resolveModelPath(liveConfig.model.path, "llm");
+      let modelPathNow = llmResolvedNow.path;
+      let modelNameNow =
+        llmResolvedNow.entry?.label ?? path.basename(modelPathNow).replace(/-Q\w+\.gguf$/, "");
+      let rerankerResolvedNow = resolveModelPath(liveConfig.model.reranker, "reranker");
+      let rerankModelPathNow = rerankerResolvedNow.path;
+      let rerankNameNow =
+        rerankerResolvedNow.entry?.label ?? path.basename(rerankModelPathNow).replace(/-q\w+\.gguf$/i, "");
+      const nCtx = liveConfig.model.nCtx ?? 32768;
 
-  const harnessOpts = {
-    maxTurns: MAX_TOOL_TURNS,
-    findingsMaxChars,
-    reasoningMode: liveConfig.defaults.reasoningMode,
-  };
+      let ctx: SessionContext | null = null;
+      let reranker: Reranker | null = null;
 
-  // Helper: start a per-query run-dir before any operation that produces
-  // artifacts (research or passthrough). Reads liveConfig at call time so
-  // composer-driven output-dir changes take effect on the next query.
-  function startRunDir(query: string, mode: "flat" | "deep"): void {
-    const outputDir = liveConfig.sources.outputDir ?? process.cwd();
-    runDirSink.start({ outputDir, query, mode });
-  }
+      // First iteration uses the bootstrapped plan (no bus emit needed).
+      // Subsequent iterations re-plan via the bus since paths may have
+      // changed — both restart-time replan (above) and recovery-time replan
+      // (catch block below) handle their own emit.
+      let firstBootIteration = iterCaptured === 0;
 
-  // ── JSONL / --query scripted path ──────────────────────────
-  // When Ink isn't mounted, run runQuery and (if the planner returned a
-  // research plan) auto-execute it via runResearchPlan. `--query` without
-  // a TTY runs exactly one query then exits; clarify isn't actionable
-  // (no UI to answer questions) and aborts.
-  if (!useInk) {
-    if (!initialQuery) {
-      process.stderr.write("Non-TTY mode requires --query.\n");
-      process.exit(2);
-    }
-    const sources = buildSources(liveConfig);
-    if (sources.length === 0) {
-      process.stderr.write(
-        "No source configured. Set TAVILY_API_KEY, pass --corpus <dir>, or store one in harness.json.\n",
-      );
-      process.exit(2);
-    }
-    const wallStartMs = performance.now();
-    const result = yield* runQuery(initialQuery, session, sources, reranker, {
-      ...harnessOpts,
-      wallStartMs,
-      onStart: () =>
-        startRunDir(initialQuery, liveConfig.defaults.reasoningMode),
-    });
-    if (result.type === "clarify") {
-      process.stderr.write(
-        "Planner asked clarifying questions; non-TTY mode can't answer. Aborting.\n",
-      );
-      process.exit(2);
-    }
-    if (result.type === "research_plan") {
-      startRunDir(initialQuery, liveConfig.defaults.reasoningMode);
-      yield* runResearchPlan(
-        initialQuery,
-        result.plan,
-        session,
-        sources,
-        reranker,
-        { ...harnessOpts, wallStartMs },
-      );
-    }
-    return;
-  }
-
-  // ── Ink TTY command loop ───────────────────────────────────
-  // (config is already seeded via the render() bootstrap arg above.)
-
-  let pendingPlan: {
-    plan: PlanResult;
-    query: string;
-    mode: "flat" | "deep";
-    wallStartMs: number;
-  } | null = null;
-
-  // Auto-submit if --query was passed. Handled inline (not via commands)
-  // because the commands Signal isn't yet being drained, and Signals don't
-  // buffer — a send before `each(commands)` starts would be lost.
-  if (initialQuery) {
-    const mode = liveConfig.defaults.reasoningMode;
-    const wallStartMs = performance.now();
-    const sources = buildSources(liveConfig);
-    const result = yield* runQuery(initialQuery, session, sources, reranker, {
-      ...harnessOpts,
-      reasoningMode: mode,
-      wallStartMs,
-      onStart: () => startRunDir(initialQuery, mode),
-    });
-    if (result.type === "research_plan") {
-      pendingPlan = { plan: result.plan, query: initialQuery, mode, wallStartMs };
-      yield* events.send({ type: "ui:plan_review" });
-    } else if (result.type === "clarify") {
-      pendingPlan = { plan: result.plan, query: initialQuery, mode, wallStartMs };
-    } else {
-      yield* events.send({ type: "ui:composer" });
-    }
-  }
-
-  for (const cmd of yield* each(commands)) {
-    try {
-      if (cmd.type === "quit") break;
-
-      if (cmd.type === "set_tavily_key") {
-        liveConfig = {
-          ...liveConfig,
-          sources: { ...liveConfig.sources, tavilyKey: cmd.key },
-        };
-        const saved = saveConfig(
-          { sources: { tavilyKey: cmd.key } },
-          configPath,
-        );
-        const reloaded = loadConfig(configPath, {
-          modelPath: cliModelPath,
-          reranker: flags.reranker,
-          corpusPath: flags.corpus,
-          reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-          outputDir: cliOutputDir,
-        });
-        liveConfig = reloaded.config;
-        liveOrigin = reloaded.origin;
-        yield* events.send({
-          type: "config:updated",
-          config: liveConfig,
-          origin: liveOrigin,
-          savedTo: saved.path,
-          gitignored: saved.gitignored,
-          skipped: saved.skipped,
-        });
-      } else if (cmd.type === "set_output_dir") {
-        // Resolve at the boundary: ~ expansion + relative→absolute happen
-        // here so the persisted form in harness.json is always absolute.
-        // Empty input clears the field (saveConfig drops empty values).
-        const resolved = cmd.path ? resolvePath(cmd.path) : "";
-        const saved = saveConfig(
-          { sources: { outputDir: resolved } },
-          configPath,
-        );
-        const reloaded = loadConfig(configPath, {
-          modelPath: cliModelPath,
-          reranker: flags.reranker,
-          corpusPath: flags.corpus,
-          reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-          outputDir: cliOutputDir,
-        });
-        liveConfig = reloaded.config;
-        liveOrigin = reloaded.origin;
-        yield* events.send({
-          type: "config:updated",
-          config: liveConfig,
-          origin: liveOrigin,
-          savedTo: saved.path,
-          gitignored: saved.gitignored,
-          skipped: saved.skipped,
-        });
-      } else if (cmd.type === "set_corpus_path") {
-        const resolved = cmd.path ? resolvePath(cmd.path) : "";
-        // Validate BEFORE persisting. A bad path that lands in
-        // harness.json bricks every subsequent boot until the user
-        // hand-edits the file. Empty path always succeeds (it clears).
-        if (resolved) {
-          uiChannel.send({
-            type: "weights:start",
-            label: "Indexing corpus…",
-          });
-          let indexed: { resources: unknown[]; chunks: unknown[] };
-          try {
-            indexed = yield* indexCorpus(resolved, uiChannel);
-          } catch (err) {
-            uiChannel.send({ type: "weights:done" });
-            yield* events.send({
-              type: "ui:error",
-              message: `Cannot use ${resolved}: ${(err as Error).message}`,
-            });
-            continue;
+      while (ctx === null || reranker === null) {
+        let lastFailedKind: "llm" | "reranker" = "llm";
+        try {
+          if (!firstBootIteration) {
+            planDownloads([llmResolvedNow, rerankerResolvedNow]);
           }
+          firstBootIteration = false;
+
+          lastFailedKind = "llm";
+          yield* ensureFile(llmResolvedNow);
+
+          lastFailedKind = "reranker";
+          yield* ensureFile(rerankerResolvedNow);
+
+          lastFailedKind = "llm";
+          uiChannel.send({ type: "weights:start", label: `Loading ${modelNameNow}…` });
+          ctx = yield* call(() =>
+            createContext({
+              modelPath: modelPathNow,
+              nCtx,
+              nSeqMax: 64,
+              typeK: "q4_0",
+              typeV: "q4_0",
+            }),
+          );
+
+          lastFailedKind = "reranker";
+          uiChannel.send({ type: "weights:label", label: `Loading ${rerankNameNow}…` });
+          reranker = yield* call(() =>
+            createReranker(rerankModelPathNow, { nSeqMax: 8, nCtx: 16384 }),
+          );
+        } catch (err) {
+          if (ctx) {
+            try { ctx.dispose?.(); } catch { /* best-effort */ }
+            ctx = null;
+          }
+          reranker = null;
+          uiChannel.send({
+            type: "boot:error",
+            kind: lastFailedKind,
+            message: errorMessage(err),
+          });
+          const cmd = yield* awaitBootRecovery();
+          if (cmd.type === "quit") {
+            return "quit";
+          }
+          if (cmd.type === "set_model_path") {
+            saveConfig({ model: { path: cmd.path } }, configPath);
+            cliModelOverride = undefined;
+            llmResolvedNow = resolveModelPath(cmd.path, "llm");
+            modelPathNow = llmResolvedNow.path;
+            modelNameNow =
+              llmResolvedNow.entry?.label ?? path.basename(modelPathNow);
+          } else {
+            saveConfig({ model: { reranker: cmd.path } }, configPath);
+            cliRerankerOverride = undefined;
+            rerankerResolvedNow = resolveModelPath(cmd.path, "reranker");
+            rerankModelPathNow = rerankerResolvedNow.path;
+            rerankNameNow =
+              rerankerResolvedNow.entry?.label ?? path.basename(rerankModelPathNow);
+          }
+          const reloaded = loadConfig(configPath, {
+            modelPath: cliModelOverride,
+            reranker: cliRerankerOverride,
+            corpusPath: flags.corpus,
+            reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+            outputDir: cliOutputDir,
+            nCtx: nCtxCli,
+          });
+          liveConfig = reloaded.config;
+          liveOrigin = reloaded.origin;
+        }
+      }
+
+      // Per-iteration cleanup. ensure() fires when this spawned scope ends
+      // (return / throw / halt) — gives us the per-restart teardown without
+      // any explicit dispose call in the handler.
+      const ctxFinal = ctx;
+      const rerankerFinal = reranker;
+      yield* ensure(() => {
+        rerankerFinal.dispose();
+      });
+      yield* ensure(() => {
+        try { ctxFinal.dispose?.(); } catch { /* best-effort */ }
+      });
+      uiChannel.send({ type: "weights:done" });
+
+      // ── Session + event forwarding ─────────────────────────────
+      const runDirSink = new RunDirSink();
+
+      const { session, events } = yield* initAgents<WorkflowEvent>(ctxFinal, {
+        traceWriter,
+      });
+
+      // Spawned children of this iteration's scope auto-halt on return —
+      // no manual cleanup needed.
+      yield* spawn(function* () {
+        for (const ev of yield* each(events)) {
+          runDirSink.handle(ev as WorkflowEvent);
+          uiChannel.send(ev as WorkflowEvent);
+          yield* each.next();
+        }
+      });
+
+      // Eager corpus indexing — runs during the 'loading' phase. Tolerates
+      // a stale corpusPath in harness.json (dir deleted, drive unmounted)
+      // by surfacing a toast and continuing.
+      if (liveConfig.sources.corpusPath) {
+        try {
+          const indexed = yield* indexCorpus(
+            liveConfig.sources.corpusPath,
+            uiChannel,
+          );
           uiChannel.send({
             type: "corpus:indexed",
-            corpusPath: resolved,
+            corpusPath: liveConfig.sources.corpusPath,
             fileCount: indexed.resources.length,
             chunkCount: indexed.chunks.length,
           });
-          uiChannel.send({ type: "weights:done" });
-        }
-        // Path validated (or empty) — persist + reload.
-        const saved = saveConfig(
-          { sources: { corpusPath: resolved } },
-          configPath,
-        );
-        const reloaded = loadConfig(configPath, {
-          modelPath: cliModelPath,
-          reranker: flags.reranker,
-          corpusPath: flags.corpus,
-          reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-          outputDir: cliOutputDir,
-        });
-        liveConfig = reloaded.config;
-        liveOrigin = reloaded.origin;
-        yield* events.send({
-          type: "config:updated",
-          config: liveConfig,
-          origin: liveOrigin,
-          savedTo: saved.path,
-          gitignored: saved.gitignored,
-          skipped: saved.skipped,
-        });
-        if (resolved) yield* events.send({ type: "ui:composer" });
-      } else if (cmd.type === "submit_query") {
-        const sources = buildSources(liveConfig);
-        if (sources.length === 0) {
-          yield* events.send({
+        } catch (err) {
+          uiChannel.send({
             type: "ui:error",
-            message: "No source configured. Add Tavily key or corpus path.",
-          });
-          continue;
-        }
-        const wallStartMs = performance.now();
-        if (cmd.skipPlanner) {
-          // START path: skip the planner entirely. The user's literal
-          // query becomes a single research task. The synth gate inside
-          // runResearchPlan auto-skips synth for single-task plans, so
-          // the lone agent's report flows out as the answer.
-          const plan = singleTaskPlan(cmd.query);
-          yield* events.send({
-            type: "plan:start",
-            query: cmd.query,
-            mode: cmd.mode,
-          });
-          yield* events.send({
-            type: "query",
-            query: cmd.query,
-            warm: !!session.trunk,
-          });
-          yield* events.send({
-            type: "plan",
-            intent: plan.intent,
-            tasks: plan.tasks,
-            clarifyQuestions: plan.clarifyQuestions,
-            tokenCount: plan.tokenCount,
-            timeMs: plan.timeMs,
-          });
-          startRunDir(cmd.query, cmd.mode);
-          yield* runResearchPlan(cmd.query, plan, session, sources, reranker, {
-            ...harnessOpts,
-            reasoningMode: cmd.mode,
-            wallStartMs,
-          });
-          yield* events.send({ type: "ui:composer" });
-          continue;
-        }
-        const result = yield* runQuery(cmd.query, session, sources, reranker, {
-          ...harnessOpts,
-          reasoningMode: cmd.mode,
-          context: buildPlannerContext(sources),
-          wallStartMs,
-          onStart: () => startRunDir(cmd.query, cmd.mode),
-        });
-        if (result.type === "research_plan") {
-          pendingPlan = {
-            plan: result.plan,
-            query: cmd.query,
-            mode: cmd.mode,
-            wallStartMs,
-          };
-          yield* events.send({ type: "ui:plan_review" });
-        } else if (result.type === "clarify") {
-          pendingPlan = {
-            plan: result.plan,
-            query: cmd.query,
-            mode: cmd.mode,
-            wallStartMs,
-          };
-          // Stays in clarifying via the plan event.
-        } else {
-          yield* events.send({ type: "ui:composer" });
-        }
-      } else if (cmd.type === "submit_clarification" && pendingPlan) {
-        // Re-run the planner with the prior questions and the user's
-        // answer folded into the context. Sources unchanged.
-        const {
-          query: origQuery,
-          plan: priorPlan,
-          mode,
-          wallStartMs,
-        } = pendingPlan;
-        const sources = buildSources(liveConfig);
-        const qa = [
-          "Prior clarification exchange:",
-          ...priorPlan.clarifyQuestions.map((q, i) => `(${i + 1}) ${q}`),
-          "",
-          `User response: ${cmd.answer}`,
-          "",
-          "Use this exchange to proceed with research if possible.",
-        ].join("\n");
-        const result = yield* runQuery(origQuery, session, sources, reranker, {
-          ...harnessOpts,
-          reasoningMode: mode,
-          context: [buildPlannerContext(sources), qa]
-            .filter(Boolean)
-            .join("\n\n"),
-          wallStartMs,
-          onStart: () => startRunDir(origQuery, mode),
-        });
-        if (result.type === "research_plan") {
-          pendingPlan = { plan: result.plan, query: origQuery, mode, wallStartMs };
-          yield* events.send({ type: "ui:plan_review" });
-        } else if (result.type === "clarify") {
-          pendingPlan = { plan: result.plan, query: origQuery, mode, wallStartMs };
-        } else {
-          pendingPlan = null;
-          yield* events.send({ type: "ui:composer" });
-        }
-      } else if (cmd.type === "change_mode" && pendingPlan) {
-        const sources = buildSources(liveConfig);
-        const result = yield* runQuery(
-          pendingPlan.query,
-          session,
-          sources,
-          reranker,
-          {
-            ...harnessOpts,
-            reasoningMode: cmd.mode,
-            context: buildPlannerContext(sources),
-            wallStartMs: pendingPlan.wallStartMs,
-            onStart: () => startRunDir(pendingPlan!.query, cmd.mode),
-          },
-        );
-        if (result.type === "research_plan") {
-          pendingPlan = { ...pendingPlan, plan: result.plan, mode: cmd.mode };
-          yield* events.send({ type: "ui:plan_review" });
-        } else if (result.type === "clarify") {
-          pendingPlan = { ...pendingPlan, plan: result.plan, mode: cmd.mode };
-        } else {
-          pendingPlan = null;
-          yield* events.send({ type: "ui:composer" });
-        }
-      } else if (cmd.type === "accept_plan" && pendingPlan) {
-        if (pendingPlan.plan.intent === "clarify") {
-          pendingPlan = null;
-          yield* events.send({ type: "ui:composer" });
-          continue;
-        }
-        const sources = buildSources(liveConfig);
-        if (sources.length === 0) {
-          yield* events.send({
-            type: "ui:error",
-            message: "No source configured. Add Tavily key or corpus path.",
-          });
-          pendingPlan = null;
-          continue;
-        }
-        startRunDir(pendingPlan.query, pendingPlan.mode);
-        yield* runResearchPlan(
-          pendingPlan.query,
-          pendingPlan.plan,
-          session,
-          sources,
-          reranker,
-          {
-            ...harnessOpts,
-            reasoningMode: pendingPlan.mode,
-            wallStartMs: pendingPlan.wallStartMs,
-          },
-        );
-        pendingPlan = null;
-        yield* events.send({ type: "ui:composer" });
-      } else if (cmd.type === "cancel_plan") {
-        pendingPlan = null;
-        yield* events.send({ type: "ui:composer" });
-      } else if (cmd.type === "edit_plan") {
-        pendingPlan = null;
-        yield* events.send({ type: "ui:composer", prefill: cmd.query });
-      } else if (cmd.type === "update_task_description" && pendingPlan) {
-        // Update the canonical plan held alongside the reducer state so
-        // accept_plan reads the edited tasks. The reducer also updates
-        // its copy via the plan:task_updated event below.
-        pendingPlan.plan.tasks = pendingPlan.plan.tasks.map((t, i) =>
-          i === cmd.index ? { ...t, description: cmd.description } : t,
-        );
-        yield* events.send({
-          type: "plan:task_updated",
-          index: cmd.index,
-          description: cmd.description,
-        });
-      } else if (cmd.type === "add_task" && pendingPlan) {
-        const insertAt = Math.max(
-          0,
-          Math.min(pendingPlan.plan.tasks.length, cmd.afterIndex + 1),
-        );
-        pendingPlan.plan.tasks = [
-          ...pendingPlan.plan.tasks.slice(0, insertAt),
-          { description: "" },
-          ...pendingPlan.plan.tasks.slice(insertAt),
-        ];
-        yield* events.send({
-          type: "plan:task_added",
-          afterIndex: cmd.afterIndex,
-        });
-      } else if (cmd.type === "delete_task" && pendingPlan) {
-        if (pendingPlan.plan.tasks.length > 1) {
-          pendingPlan.plan.tasks = pendingPlan.plan.tasks.filter(
-            (_, i) => i !== cmd.index,
-          );
-          yield* events.send({
-            type: "plan:task_deleted",
-            index: cmd.index,
-          });
-        }
-      } else if (cmd.type === "move_task" && pendingPlan) {
-        const n = pendingPlan.plan.tasks.length;
-        if (
-          cmd.from !== cmd.to &&
-          cmd.from >= 0 &&
-          cmd.from < n &&
-          cmd.to >= 0 &&
-          cmd.to < n
-        ) {
-          const tasks = [...pendingPlan.plan.tasks];
-          const [moved] = tasks.splice(cmd.from, 1);
-          tasks.splice(cmd.to, 0, moved);
-          pendingPlan.plan.tasks = tasks;
-          yield* events.send({
-            type: "plan:task_moved",
-            from: cmd.from,
-            to: cmd.to,
+            message: `Corpus disabled: ${(err as Error).message}. Use /scan to fix.`,
           });
         }
       }
-    } catch (err) {
-      pendingPlan = null;
-      yield* events.send({ type: "ui:error", message: errorMessage(err) });
-    } finally {
-      // Always advance — Effection's `each` requires a `next()` per iteration,
-      // including when the body threw. Putting this in `finally` keeps the
-      // command loop alive after a research/plan failure (otherwise the
-      // IterationError tears the whole process down — the user sees the UI
-      // error briefly, then a crash).
-      yield* each.next();
-    }
+
+      uiChannel.send({ type: "ui:composer" });
+
+      const harnessOpts = {
+        maxTurns: MAX_TOOL_TURNS,
+        findingsMaxChars,
+        reasoningMode: liveConfig.defaults.reasoningMode,
+      };
+
+      function startRunDir(query: string, mode: "flat" | "deep"): void {
+        const outputDir = liveConfig.sources.outputDir ?? process.cwd();
+        runDirSink.start({ outputDir, query, mode });
+      }
+
+      // ── JSONL / --query scripted path ──────────────────────────
+      if (!useInk) {
+        if (!initialQuery) {
+          process.stderr.write("Non-TTY mode requires --query.\n");
+          process.exit(2);
+        }
+        const sources = buildSources(liveConfig);
+        if (sources.length === 0) {
+          process.stderr.write(
+            "No source configured. Set TAVILY_API_KEY, pass --corpus <dir>, or store one in harness.json.\n",
+          );
+          process.exit(2);
+        }
+        const wallStartMs = performance.now();
+        const result = yield* runQuery(initialQuery, session, sources, reranker, {
+          ...harnessOpts,
+          wallStartMs,
+          onStart: () =>
+            startRunDir(initialQuery, liveConfig.defaults.reasoningMode),
+        });
+        if (result.type === "clarify") {
+          process.stderr.write(
+            "Planner asked clarifying questions; non-TTY mode can't answer. Aborting.\n",
+          );
+          process.exit(2);
+        }
+        if (result.type === "research_plan") {
+          startRunDir(initialQuery, liveConfig.defaults.reasoningMode);
+          yield* runResearchPlan(
+            initialQuery,
+            result.plan,
+            session,
+            sources,
+            reranker,
+            { ...harnessOpts, wallStartMs },
+          );
+        }
+        return "quit";
+      }
+
+      // ── Ink TTY command loop ───────────────────────────────────
+
+      let pendingPlan: {
+        plan: PlanResult;
+        query: string;
+        mode: "flat" | "deep";
+        wallStartMs: number;
+      } | null = null;
+
+      // Auto-submit --query only on the first iteration. Restart iterations
+      // skip this — the query already ran (or didn't) the first time.
+      if (iterCaptured === 0 && initialQuery) {
+        const mode = liveConfig.defaults.reasoningMode;
+        const wallStartMs = performance.now();
+        const sources = buildSources(liveConfig);
+        const result = yield* runQuery(initialQuery, session, sources, reranker, {
+          ...harnessOpts,
+          reasoningMode: mode,
+          wallStartMs,
+          onStart: () => startRunDir(initialQuery, mode),
+        });
+        if (result.type === "research_plan") {
+          pendingPlan = { plan: result.plan, query: initialQuery, mode, wallStartMs };
+          yield* events.send({ type: "ui:plan_review" });
+        } else if (result.type === "clarify") {
+          pendingPlan = { plan: result.plan, query: initialQuery, mode, wallStartMs };
+        } else {
+          yield* events.send({ type: "ui:composer" });
+        }
+      }
+
+      for (const cmd of yield* each(commands)) {
+        try {
+          if (cmd.type === "quit") return "quit";
+
+          if (cmd.type === "set_model_path") {
+            // Composer only mounts in 'composer' phase, so no agent is in
+            // flight here. Persist + signal restart; structured concurrency
+            // disposes ctx/reranker as this scope unwinds, and the next
+            // iteration re-boots with the new path.
+            saveConfig({ model: { path: cmd.path } }, configPath);
+            cliModelOverride = undefined;
+            return "restart";
+          }
+
+          if (cmd.type === "set_reranker_path") {
+            saveConfig({ model: { reranker: cmd.path } }, configPath);
+            cliRerankerOverride = undefined;
+            return "restart";
+          }
+
+          if (cmd.type === "set_tavily_key") {
+            liveConfig = {
+              ...liveConfig,
+              sources: { ...liveConfig.sources, tavilyKey: cmd.key },
+            };
+            const saved = saveConfig(
+              { sources: { tavilyKey: cmd.key } },
+              configPath,
+            );
+            const reloaded = loadConfig(configPath, {
+              modelPath: cliModelOverride,
+              reranker: cliRerankerOverride,
+              corpusPath: flags.corpus,
+              reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+              outputDir: cliOutputDir,
+            });
+            liveConfig = reloaded.config;
+            liveOrigin = reloaded.origin;
+            yield* events.send({
+              type: "config:updated",
+              config: liveConfig,
+              origin: liveOrigin,
+              savedTo: saved.path,
+              gitignored: saved.gitignored,
+              skipped: saved.skipped,
+            });
+          } else if (cmd.type === "set_output_dir") {
+            // Resolve at the boundary: ~ expansion + relative→absolute happen
+            // here so the persisted form in harness.json is always absolute.
+            // Empty input clears the field (saveConfig drops empty values).
+            const resolved = cmd.path ? resolvePath(cmd.path) : "";
+            const saved = saveConfig(
+              { sources: { outputDir: resolved } },
+              configPath,
+            );
+            const reloaded = loadConfig(configPath, {
+              modelPath: cliModelOverride,
+              reranker: cliRerankerOverride,
+              corpusPath: flags.corpus,
+              reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+              outputDir: cliOutputDir,
+            });
+            liveConfig = reloaded.config;
+            liveOrigin = reloaded.origin;
+            yield* events.send({
+              type: "config:updated",
+              config: liveConfig,
+              origin: liveOrigin,
+              savedTo: saved.path,
+              gitignored: saved.gitignored,
+              skipped: saved.skipped,
+            });
+          } else if (cmd.type === "set_corpus_path") {
+            const resolved = cmd.path ? resolvePath(cmd.path) : "";
+            // Validate BEFORE persisting. A bad path that lands in
+            // harness.json bricks every subsequent boot until the user
+            // hand-edits the file. Empty path always succeeds (it clears).
+            if (resolved) {
+              uiChannel.send({
+                type: "weights:start",
+                label: "Indexing corpus…",
+              });
+              let indexed: { resources: unknown[]; chunks: unknown[] };
+              try {
+                indexed = yield* indexCorpus(resolved, uiChannel);
+              } catch (err) {
+                uiChannel.send({ type: "weights:done" });
+                yield* events.send({
+                  type: "ui:error",
+                  message: `Cannot use ${resolved}: ${(err as Error).message}`,
+                });
+                continue;
+              }
+              uiChannel.send({
+                type: "corpus:indexed",
+                corpusPath: resolved,
+                fileCount: indexed.resources.length,
+                chunkCount: indexed.chunks.length,
+              });
+              uiChannel.send({ type: "weights:done" });
+            }
+            // Path validated (or empty) — persist + reload.
+            const saved = saveConfig(
+              { sources: { corpusPath: resolved } },
+              configPath,
+            );
+            const reloaded = loadConfig(configPath, {
+              modelPath: cliModelOverride,
+              reranker: cliRerankerOverride,
+              corpusPath: flags.corpus,
+              reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+              outputDir: cliOutputDir,
+            });
+            liveConfig = reloaded.config;
+            liveOrigin = reloaded.origin;
+            yield* events.send({
+              type: "config:updated",
+              config: liveConfig,
+              origin: liveOrigin,
+              savedTo: saved.path,
+              gitignored: saved.gitignored,
+              skipped: saved.skipped,
+            });
+            if (resolved) yield* events.send({ type: "ui:composer" });
+          } else if (cmd.type === "submit_query") {
+            const sources = buildSources(liveConfig);
+            if (sources.length === 0) {
+              yield* events.send({
+                type: "ui:error",
+                message: "No source configured. Add Tavily key or corpus path.",
+              });
+              continue;
+            }
+            const wallStartMs = performance.now();
+            if (cmd.skipPlanner) {
+              // START path: skip the planner entirely. The user's literal
+              // query becomes a single research task. The synth gate inside
+              // runResearchPlan auto-skips synth for single-task plans, so
+              // the lone agent's report flows out as the answer.
+              const plan = singleTaskPlan(cmd.query);
+              yield* events.send({
+                type: "plan:start",
+                query: cmd.query,
+                mode: cmd.mode,
+              });
+              yield* events.send({
+                type: "query",
+                query: cmd.query,
+                warm: !!session.trunk,
+              });
+              yield* events.send({
+                type: "plan",
+                intent: plan.intent,
+                tasks: plan.tasks,
+                clarifyQuestions: plan.clarifyQuestions,
+                tokenCount: plan.tokenCount,
+                timeMs: plan.timeMs,
+              });
+              startRunDir(cmd.query, cmd.mode);
+              yield* runResearchPlan(cmd.query, plan, session, sources, reranker, {
+                ...harnessOpts,
+                reasoningMode: cmd.mode,
+                wallStartMs,
+              });
+              yield* events.send({ type: "ui:composer" });
+              continue;
+            }
+            const result = yield* runQuery(cmd.query, session, sources, reranker, {
+              ...harnessOpts,
+              reasoningMode: cmd.mode,
+              context: buildPlannerContext(sources),
+              wallStartMs,
+              onStart: () => startRunDir(cmd.query, cmd.mode),
+            });
+            if (result.type === "research_plan") {
+              pendingPlan = {
+                plan: result.plan,
+                query: cmd.query,
+                mode: cmd.mode,
+                wallStartMs,
+              };
+              yield* events.send({ type: "ui:plan_review" });
+            } else if (result.type === "clarify") {
+              pendingPlan = {
+                plan: result.plan,
+                query: cmd.query,
+                mode: cmd.mode,
+                wallStartMs,
+              };
+              // Stays in clarifying via the plan event.
+            } else {
+              yield* events.send({ type: "ui:composer" });
+            }
+          } else if (cmd.type === "submit_clarification" && pendingPlan) {
+            // Re-run the planner with the prior questions and the user's
+            // answer folded into the context. Sources unchanged.
+            const {
+              query: origQuery,
+              plan: priorPlan,
+              mode,
+              wallStartMs,
+            } = pendingPlan;
+            const sources = buildSources(liveConfig);
+            const qa = [
+              "Prior clarification exchange:",
+              ...priorPlan.clarifyQuestions.map((q, i) => `(${i + 1}) ${q}`),
+              "",
+              `User response: ${cmd.answer}`,
+              "",
+              "Use this exchange to proceed with research if possible.",
+            ].join("\n");
+            const result = yield* runQuery(origQuery, session, sources, reranker, {
+              ...harnessOpts,
+              reasoningMode: mode,
+              context: [buildPlannerContext(sources), qa]
+                .filter(Boolean)
+                .join("\n\n"),
+              wallStartMs,
+              onStart: () => startRunDir(origQuery, mode),
+            });
+            if (result.type === "research_plan") {
+              pendingPlan = { plan: result.plan, query: origQuery, mode, wallStartMs };
+              yield* events.send({ type: "ui:plan_review" });
+            } else if (result.type === "clarify") {
+              pendingPlan = { plan: result.plan, query: origQuery, mode, wallStartMs };
+            } else {
+              pendingPlan = null;
+              yield* events.send({ type: "ui:composer" });
+            }
+          } else if (cmd.type === "change_mode" && pendingPlan) {
+            const sources = buildSources(liveConfig);
+            const result = yield* runQuery(
+              pendingPlan.query,
+              session,
+              sources,
+              reranker,
+              {
+                ...harnessOpts,
+                reasoningMode: cmd.mode,
+                context: buildPlannerContext(sources),
+                wallStartMs: pendingPlan.wallStartMs,
+                onStart: () => startRunDir(pendingPlan!.query, cmd.mode),
+              },
+            );
+            if (result.type === "research_plan") {
+              pendingPlan = { ...pendingPlan, plan: result.plan, mode: cmd.mode };
+              yield* events.send({ type: "ui:plan_review" });
+            } else if (result.type === "clarify") {
+              pendingPlan = { ...pendingPlan, plan: result.plan, mode: cmd.mode };
+            } else {
+              pendingPlan = null;
+              yield* events.send({ type: "ui:composer" });
+            }
+          } else if (cmd.type === "accept_plan" && pendingPlan) {
+            if (pendingPlan.plan.intent === "clarify") {
+              pendingPlan = null;
+              yield* events.send({ type: "ui:composer" });
+              continue;
+            }
+            const sources = buildSources(liveConfig);
+            if (sources.length === 0) {
+              yield* events.send({
+                type: "ui:error",
+                message: "No source configured. Add Tavily key or corpus path.",
+              });
+              pendingPlan = null;
+              continue;
+            }
+            startRunDir(pendingPlan.query, pendingPlan.mode);
+            yield* runResearchPlan(
+              pendingPlan.query,
+              pendingPlan.plan,
+              session,
+              sources,
+              reranker,
+              {
+                ...harnessOpts,
+                reasoningMode: pendingPlan.mode,
+                wallStartMs: pendingPlan.wallStartMs,
+              },
+            );
+            pendingPlan = null;
+            yield* events.send({ type: "ui:composer" });
+          } else if (cmd.type === "cancel_plan") {
+            pendingPlan = null;
+            yield* events.send({ type: "ui:composer" });
+          } else if (cmd.type === "edit_plan") {
+            pendingPlan = null;
+            yield* events.send({ type: "ui:composer", prefill: cmd.query });
+          } else if (cmd.type === "update_task_description" && pendingPlan) {
+            // Update the canonical plan held alongside the reducer state so
+            // accept_plan reads the edited tasks. The reducer also updates
+            // its copy via the plan:task_updated event below.
+            pendingPlan.plan.tasks = pendingPlan.plan.tasks.map((t, i) =>
+              i === cmd.index ? { ...t, description: cmd.description } : t,
+            );
+            yield* events.send({
+              type: "plan:task_updated",
+              index: cmd.index,
+              description: cmd.description,
+            });
+          } else if (cmd.type === "add_task" && pendingPlan) {
+            const insertAt = Math.max(
+              0,
+              Math.min(pendingPlan.plan.tasks.length, cmd.afterIndex + 1),
+            );
+            pendingPlan.plan.tasks = [
+              ...pendingPlan.plan.tasks.slice(0, insertAt),
+              { description: "" },
+              ...pendingPlan.plan.tasks.slice(insertAt),
+            ];
+            yield* events.send({
+              type: "plan:task_added",
+              afterIndex: cmd.afterIndex,
+            });
+          } else if (cmd.type === "delete_task" && pendingPlan) {
+            if (pendingPlan.plan.tasks.length > 1) {
+              pendingPlan.plan.tasks = pendingPlan.plan.tasks.filter(
+                (_, i) => i !== cmd.index,
+              );
+              yield* events.send({
+                type: "plan:task_deleted",
+                index: cmd.index,
+              });
+            }
+          } else if (cmd.type === "move_task" && pendingPlan) {
+            const n = pendingPlan.plan.tasks.length;
+            if (
+              cmd.from !== cmd.to &&
+              cmd.from >= 0 &&
+              cmd.from < n &&
+              cmd.to >= 0 &&
+              cmd.to < n
+            ) {
+              const tasks = [...pendingPlan.plan.tasks];
+              const [moved] = tasks.splice(cmd.from, 1);
+              tasks.splice(cmd.to, 0, moved);
+              pendingPlan.plan.tasks = tasks;
+              yield* events.send({
+                type: "plan:task_moved",
+                from: cmd.from,
+                to: cmd.to,
+              });
+            }
+          }
+        } catch (err) {
+          pendingPlan = null;
+          yield* events.send({ type: "ui:error", message: errorMessage(err) });
+        } finally {
+          // Always advance — Effection's `each` requires a `next()` per iteration,
+          // including when the body threw. Putting this in `finally` keeps the
+          // command loop alive after a research/plan failure (otherwise the
+          // IterationError tears the whole process down — the user sees the UI
+          // error briefly, then a crash).
+          yield* each.next();
+        }
+      }
+      // commands signal closed (shouldn't normally happen) — exit cleanly.
+      return "quit";
+    });
+
+    const reason = yield* task;
+    if (reason === "quit") return;
+    iteration++;
   }
 }).catch((err: unknown) => {
   process.stderr.write(`Error: ${errorMessage(err)}\n${errorStack(err)}\n`);

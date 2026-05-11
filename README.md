@@ -10,12 +10,14 @@ Then type a research question.
 
 > Built with **[HDK](https://hdk.lloyal.ai/)** — Lloyal's Harness Development Kit. The agentic envelope for local-first apps: models, tools, retrieval, and multi-agent orchestration in one import, no API keys, no inference servers.
 
+**Empirically:** 5 research agents running concurrently in a shared 32K-token context window, Qwen3.5-4B as the LLM, on a MacBook Pro M2 (16 GB unified memory). No GPU server, no API keys, no inference fees. Every token is decoded on the device that asked the question.
+
 ## What it does
 
 - Downloads a Qwen3.5-4B LLM and Qwen3 reranker on first run (~3 GB, cached in `~/.cache/lloyal/models/`).
 - Runs a planner that decomposes your question into research tasks.
-- Shows the plan in an Ink-based composer; press Enter to approve or `E` to edit.
-- Spawns research agents (parallel for `Fast` mode, chained for `Deep` mode) that query your corpus and/or the web via Tavily.
+- Shows the plan in an Ink-based composer; ↑↓ to select a task, ⏎ to edit, A/D/⇧↑↓ to add/delete/reorder, ⏎ on the START button to run.
+- Spawns research agents (parallel for `Flat` mode, chained for `Deep` mode) that query your corpus and/or the web via Tavily.
 - Synthesizes findings into a coherent answer, streamed live.
 
 ## Configuration
@@ -30,7 +32,7 @@ State lives in `./harness.json` (auto-created, auto-gitignored on first save):
     "outputDir": "./reasoning-runs"    // optional — defaults to cwd
   },
   "defaults": {
-    "reasoningMode": "deep"            // or "flat"
+    "reasoningMode": "flat"            // or "deep"
   },
   "model": {
     "nCtx": 32768                      // LLM context window
@@ -117,8 +119,8 @@ For Cmd+Backspace / Cmd+arrow to work, turn on "Natural Text Editing" in iTerm2,
 reasoning.run is a working example of [Lloyal's **Harness Development Kit**](https://hdk.lloyal.ai/) — the same primitives ship intelligence directly into desktop and mobile apps, no cloud round-trip required. Specifically:
 
 - **`useAgent`** — single agents with tools and a terminal report tool. Powers the planner, the bridge, and synth.
-- **`agentPool` + `parallel`/`chain`** — multi-agent orchestration. Drives the research phase: parallel fan-out for `Fast` mode, chained tasks for `Deep` mode.
-- **Continuous Context Spine** — agents share GPU KV state instead of re-tokenizing strings, so a 32K-context pipeline runs on a consumer laptop. Why subsequent queries in the same session are warm and instant.
+- **`agentPool` + `parallel`/`chain`** — multi-agent orchestration. Drives the research phase: parallel fan-out for `Flat` mode, chained tasks for `Deep` mode.
+- **Continuous Context Spine** — agents share GPU KV state instead of re-tokenizing strings, so 5 concurrent agents fit inside one 32K-token context budget on consumer hardware. Also why subsequent queries in the same session are warm and instant — the prior turn's tokens are still in the trunk's KV.
 - **Retrieval-Interleaved Generation (RIG)** — `WebSource` (Tavily) and `CorpusSource` (local markdown) plug in via the `Source` contract, with reranker-scored chunks fed inline during generation.
 - **`@lloyal-labs/lloyal.node`** — llama.cpp Node binding for in-process inference.
 

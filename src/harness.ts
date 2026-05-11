@@ -72,7 +72,7 @@ import SYNTHESIZE_RAW from "./prompts/synthesize.eta";
 import SYNTHESIZE_FLAT_RAW from "./prompts/synthesize-flat.eta";
 import CORPUS_WORKER_RAW from "./prompts/corpus-worker.eta";
 import WEB_WORKER_RAW from "./prompts/web-worker.eta";
-import SKILL_CATALOG_RAW from "./prompts/skill-catalog.eta";
+import PLAYBOOKS_RAW from "./prompts/playbooks.eta";
 
 function parsePrompt(raw: string): { system: string; user: string } {
   const trimmed = raw.trim();
@@ -92,7 +92,7 @@ const SYNTHESIZE_DEEP = parsePrompt(SYNTHESIZE_RAW);
 const SYNTHESIZE_FLAT = parsePrompt(SYNTHESIZE_FLAT_RAW);
 const CORPUS_WORKER_TEMPLATE = CORPUS_WORKER_RAW;
 const WEB_WORKER_TEMPLATE = WEB_WORKER_RAW;
-const SKILL_CATALOG_TEMPLATE = SKILL_CATALOG_RAW;
+const PLAYBOOKS_TEMPLATE = PLAYBOOKS_RAW;
 
 function createResearchPolicy(): DefaultAgentPolicy {
   return new DefaultAgentPolicy({
@@ -408,7 +408,7 @@ export function* runResearchPlan(
       typeof (s as unknown as { promptData?: () => unknown }).promptData ===
       "function",
   );
-  const skillCatalog = renderTemplate(SKILL_CATALOG_TEMPLATE, {
+  const playbooks = renderTemplate(PLAYBOOKS_TEMPLATE, {
     hasWeb,
     hasCorpus,
   });
@@ -430,7 +430,7 @@ export function* runResearchPlan(
   }>(
     {
       parent: session.trunk ?? undefined,
-      systemPrompt: skillCatalog,
+      systemPrompt: playbooks,
       toolsJson: researchToolkit.toolsJson,
     },
     function* (queryRoot) {
