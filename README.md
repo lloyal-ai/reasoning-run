@@ -8,6 +8,12 @@ npx reasoning.run
 
 Then type a research question.
 
+<p>
+  <img src="assets/demo-readme.gif" alt="reasoning.run: clarifying questions → plan approval → 5 research agents in parallel → synthesized report" width="100%">
+  <br>
+  <em>Qwen3.5 4B + Qwen3 0.6B reranker · 5 parallel agents · shared 32K context · fully offline on M2 MacBook Pro 16 GB</em>
+</p>
+
 > Built with **[HDK](https://hdk.lloyal.ai/)** — Lloyal's Harness Development Kit. The agentic envelope for local-first apps: models, tools, retrieval, and multi-agent orchestration in one import, no API keys, no inference servers.
 
 **Empirically:** 5 research agents running concurrently in a shared 32K-token context window, Qwen3.5-4B as the LLM, on a MacBook Pro M2 (16 GB unified memory). No GPU server, no API keys, no inference fees. Every token is decoded on the device that asked the question.
