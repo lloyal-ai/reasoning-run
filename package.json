@@ -1,7 +1,7 @@
 {
   "name": "reasoning.run",
-  "version": "0.1.1",
-  "description": "Local deep-research agent composer — runs on your machine, zero-config after the first query. Built with Lloyal HDK.",
+  "version": "0.1.2",
+  "description": "A private reasoner for your terminal. Direct conversation or grounded multi-agent research, GPU-native and fully local. No API keys, no inference servers.",
   "bin": {
     "reasoning.run": "bin/run.js"
   },
@@ -42,13 +42,20 @@
     "node": ">=22"
   },
   "keywords": [
+    "reasoning",
+    "private-reasoner",
     "deep-research",
-    "local-llm",
+    "grounded-reasoning",
+    "multi-agent",
     "agents",
+    "rag",
+    "local-llm",
+    "offline",
+    "on-device",
+    "gpu",
     "llama.cpp",
     "cli",
-    "tui",
-    "ink"
+    "tui"
   ],
   "repository": {
     "type": "git",
