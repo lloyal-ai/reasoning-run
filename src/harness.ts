@@ -42,7 +42,7 @@ import {
   chain,
   parallel,
   renderTemplate,
-  withSharedRoot,
+  withSpine,
   DefaultAgentPolicy,
 } from "@lloyal-labs/lloyal-agents";
 import type { Source, AgentEvent } from "@lloyal-labs/lloyal-agents";
@@ -422,7 +422,7 @@ export function* runResearchPlan(
     totalTokens: researchTotalTokens,
     totalToolCalls: researchTotalToolCalls,
     synthTokens: synthTotalTokens,
-  } = yield* withSharedRoot<{
+  } = yield* withSpine<{
     answer: string;
     totalTokens: number;
     totalToolCalls: number;
@@ -433,14 +433,14 @@ export function* runResearchPlan(
       systemPrompt: playbooks,
       toolsJson: researchToolkit.toolsJson,
     },
-    function* (queryRoot) {
+    function* (querySpine) {
       if (opts.reasoningMode === "flat") {
         yield* send({ type: "fanout:tasks", tasks });
       }
 
       const research = yield* agentPool({
         tools: [...allDataTools, reportTool],
-        parent: queryRoot,
+        parent: querySpine,
         terminalTool: "report",
         maxTurns: opts.maxTurns,
         pruneOnReport: true,
@@ -549,7 +549,7 @@ export function* runResearchPlan(
       const synth = yield* useAgent({
         systemPrompt: renderTemplate(synthPrompt.system, synthCtx),
         task: renderTemplate(synthPrompt.user, synthCtx),
-        parent: queryRoot,
+        parent: querySpine,
         policy: new SynthPolicy(),
         maxTurns: opts.maxTurns,
       });
