@@ -1,6 +1,6 @@
 {
   "name": "reasoning.run",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A private reasoner for your terminal. Direct conversation or grounded multi-agent research, GPU-native and fully local. No API keys, no inference servers.",
   "bin": {
     "reasoning.run": "bin/run.js"
