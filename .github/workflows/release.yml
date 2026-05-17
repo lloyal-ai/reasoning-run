@@ -47,12 +47,11 @@ jobs:
             exit 1
           fi
 
-      # --provenance NOT used here. npm provenance requires a public
-      # source repo, but reasoning-run is intentionally internal: the
-      # proprietary LICENSE + bundled-only npm tarball are deliberate
-      # IP protection. Making the repo public to satisfy provenance
-      # would defeat that posture. Token-based publish is still the
-      # baseline industry-standard for closed-source CLIs.
+      # Trusted publisher (OIDC) + provenance. npm verifies the publish
+      # came from this repo + this workflow file, then signs an attestation
+      # binding the tarball to the source commit and the runner. No
+      # long-lived NPM_TOKEN — `id-token: write` (granted above) is the
+      # only credential. Requires the repo to be public.
       - name: Publish to npm
         if: success() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.skip_publish))
         run: |
@@ -62,7 +61,5 @@ jobs:
             echo "⏭ $name@$version already published, skipping"
           else
             echo "Publishing $name@$version..."
-            npm publish --access public
+            npm publish --access public --provenance
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
