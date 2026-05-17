@@ -822,10 +822,19 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
     case 'agent:done': {
       // Do NOT mark the agent `done` here. In the stall-break path,
       // agent:done fires BEFORE recoverInline streams recovery tokens via
-      // agent:produce → agent:report. Freezing to `done` would drop those
+      // agent:produce → agent:recovered. Freezing to `done` would drop those
       // tokens. Force-close any live think (recovery opens a fresh one on
       // its first produce) and step back to `idle` so the produce handler's
-      // re-enter-thinking branch fires. Only agent:report marks `done`.
+      // re-enter-thinking branch fires. Only agent:return / agent:recovered
+      // mark `done`.
+      //
+      // Clear contentBuffer too: if the agent was in `content` phase when
+      // killed (mid tool-call JSON), the partial buffer never resolves to a
+      // tool_call, and ContentStream's `▸ streaming` label would keep
+      // squatting at the bottom of the column for the entire recovery
+      // duration — misleading the user into thinking the agent is still live.
+      // Recovery emits agent:produce into a fresh think block, not back into
+      // contentBuffer, so clearing it here has no downside.
       const agent = state.agents.get(ev.agentId);
       if (!agent) return state;
       let working = state;
@@ -834,7 +843,11 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         const finalBody = thinkItem && thinkItem.kind === 'think' ? thinkItem.body : '';
         working = closeThink(working, ev.agentId, finalBody);
       }
-      return replaceAgent(working, ev.agentId, (a) => ({ ...a, phase: 'idle' }));
+      return replaceAgent(working, ev.agentId, (a) => ({
+        ...a,
+        phase: 'idle',
+        contentBuffer: '',
+      }));
     }
 
     case 'agent:tick':
