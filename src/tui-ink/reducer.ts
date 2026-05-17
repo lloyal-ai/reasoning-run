@@ -755,7 +755,8 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
     case 'agent:tool_progress':
       return state;
 
-    case 'agent:report': {
+    case 'agent:return':
+    case 'agent:recovered': {
       const agent = state.agents.get(ev.agentId);
       if (!agent) return state;
 

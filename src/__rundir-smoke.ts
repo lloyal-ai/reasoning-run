@@ -61,9 +61,9 @@ check('flat-mode: writes report.md + annexure-{1,2,3}.md', () => {
     { type: 'agent:spawn', agentId: 1, parentAgentId: 0 } as WorkflowEvent,
     { type: 'agent:spawn', agentId: 2, parentAgentId: 0 } as WorkflowEvent,
     { type: 'agent:spawn', agentId: 3, parentAgentId: 0 } as WorkflowEvent,
-    { type: 'agent:report', agentId: 1, result: 'STT findings: Whisper INT4 hits ~120ms.' } as WorkflowEvent,
-    { type: 'agent:report', agentId: 2, result: 'LLM findings: Phi-3 4-bit at ~80ms/tok.' } as WorkflowEvent,
-    { type: 'agent:report', agentId: 3, result: 'TTS findings: StyleTTS2 at ~90ms.' } as WorkflowEvent,
+    { type: 'agent:return', agentId: 1, result: 'STT findings: Whisper INT4 hits ~120ms.' } as WorkflowEvent,
+    { type: 'agent:return', agentId: 2, result: 'LLM findings: Phi-3 4-bit at ~80ms/tok.' } as WorkflowEvent,
+    { type: 'agent:return', agentId: 3, result: 'TTS findings: StyleTTS2 at ~90ms.' } as WorkflowEvent,
     { type: 'research:done', totalTokens: 400, totalToolCalls: 12, timeMs: 4000 },
     { type: 'synthesize:start' },
     {
@@ -108,10 +108,10 @@ check('deep-mode: spine:task captures descriptions for annexures', () => {
     { type: 'research:start', agentCount: 2, mode: 'deep' },
     { type: 'spine:task', taskIndex: 0, taskCount: 2, description: 'Background research' },
     { type: 'agent:spawn', agentId: 1, parentAgentId: 0 } as WorkflowEvent,
-    { type: 'agent:report', agentId: 1, result: 'Background facts.' } as WorkflowEvent,
+    { type: 'agent:return', agentId: 1, result: 'Background facts.' } as WorkflowEvent,
     { type: 'spine:task', taskIndex: 1, taskCount: 2, description: 'Synthesize implications' },
     { type: 'agent:spawn', agentId: 2, parentAgentId: 0 } as WorkflowEvent,
-    { type: 'agent:report', agentId: 2, result: 'Implications follow.' } as WorkflowEvent,
+    { type: 'agent:return', agentId: 2, result: 'Implications follow.' } as WorkflowEvent,
     { type: 'research:done', totalTokens: 200, totalToolCalls: 5, timeMs: 3000 },
     {
       type: 'synthesize:done',
@@ -140,7 +140,7 @@ check('synth agent:spawn (after research:done) is not annexed', () => {
     { type: 'research:start', agentCount: 1, mode: 'flat' },
     { type: 'fanout:tasks', tasks: [{ description: 'Sole task' }] as never },
     { type: 'agent:spawn', agentId: 1, parentAgentId: 0 } as WorkflowEvent,
-    { type: 'agent:report', agentId: 1, result: 'Research result.' } as WorkflowEvent,
+    { type: 'agent:return', agentId: 1, result: 'Research result.' } as WorkflowEvent,
     { type: 'research:done', totalTokens: 100, totalToolCalls: 1, timeMs: 1000 },
     { type: 'agent:spawn', agentId: 99, parentAgentId: 0 } as WorkflowEvent, // synth
     {

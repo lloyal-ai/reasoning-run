@@ -32,12 +32,10 @@
 import { call } from "effection";
 import type { Operation } from "effection";
 import type { Session, SessionContext } from "@lloyal-labs/sdk";
-import { buildTurnDelta } from "@lloyal-labs/sdk";
 import {
   Ctx,
   Events,
   agentPool,
-  createToolkit,
   useAgent,
   chain,
   parallel,
@@ -101,7 +99,7 @@ function createResearchPolicy(): DefaultAgentPolicy {
       time: { softLimit: 240_000, hardLimit: 360_000 },
     },
     recovery: { prompt: RECOVERY },
-    terminalTool: "report",
+    terminalToolName: "report",
   });
 }
 
@@ -122,7 +120,7 @@ class SynthPolicy extends DefaultAgentPolicy {
   ): ReturnType<DefaultAgentPolicy["onProduced"]> {
     const [, parsed] = args;
     if (!parsed.toolCalls[0] && parsed.content) {
-      return { type: "free_text_report", content: parsed.content };
+      return { type: "free_text_return", content: parsed.content };
     }
     return super.onProduced(...args);
   }
@@ -412,7 +410,7 @@ export function* runResearchPlan(
     hasWeb,
     hasCorpus,
   });
-  const researchToolkit = createToolkit([...allDataTools, reportTool]);
+  const researchTools = [...allDataTools, reportTool];
 
   let synthTimeMs = 0;
   let researchTimeMs = 0;
@@ -431,7 +429,7 @@ export function* runResearchPlan(
     {
       parent: session.trunk ?? undefined,
       systemPrompt: playbooks,
-      toolsJson: researchToolkit.toolsJson,
+      tools: researchTools,
     },
     function* (querySpine) {
       if (opts.reasoningMode === "flat") {
@@ -439,11 +437,11 @@ export function* runResearchPlan(
       }
 
       const research = yield* agentPool({
-        tools: [...allDataTools, reportTool],
+        tools: researchTools,
         parent: querySpine,
-        terminalTool: "report",
+        terminalToolName: "report",
         maxTurns: opts.maxTurns,
-        pruneOnReport: true,
+        pruneOnReturn: true,
         policy: createResearchPolicy(),
         scorer: primaryScorer,
         enableThinking: true,

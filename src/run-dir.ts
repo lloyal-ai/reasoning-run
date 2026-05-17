@@ -67,7 +67,8 @@ export class RunDirSink {
           this.agentToOrdinal.set(ev.agentId, this.spawnOrdinal);
         }
         break;
-      case 'agent:report': {
+      case 'agent:return':
+      case 'agent:recovered': {
         const ord = this.agentToOrdinal.get(ev.agentId);
         if (ord !== undefined) this.writeAnnexure(ord, ev.result);
         break;
