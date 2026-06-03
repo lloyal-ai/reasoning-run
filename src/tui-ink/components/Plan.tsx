@@ -37,6 +37,7 @@ export const Plan = memo(function Plan({ plan, mode }: PlanProps): React.ReactEl
       {plan.tasks.map((t, i) => (
         <Text key={i}>
           <Text dimColor>  ({i + 1})</Text> {t.description}
+          {t.app ? <Text color="magenta">{` [${t.app}]`}</Text> : null}
         </Text>
       ))}
     </Box>

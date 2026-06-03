@@ -11,7 +11,7 @@
 
 import type { Config, ConfigOrigin } from './config';
 
-export type Phase = 'idle' | 'query' | 'plan' | 'research' | 'synth' | 'done';
+export type Phase = 'idle' | 'recon' | 'query' | 'plan' | 'research' | 'synth' | 'done';
 
 /** Drives which top-level view the App renders. Distinct from `phase` —
  *  `phase` tracks the workflow progress; `uiPhase` tracks what the user
@@ -21,6 +21,7 @@ export type UiPhase =
   | 'downloading'    // model cache miss — spinner + per-file progress bars
   | 'loading'        // createContext / createReranker running; single spinner
   | 'composer'       // query input, source/mode editing
+  | 'discovering'    // pre-flight recon agent probing sources; streams live
   | 'planning'       // planner running, spinner
   | 'plan_review'    // plan dialog visible, accept/edit/change-mode
   | 'clarifying'     // planner asked questions; composer takes the answer
@@ -178,7 +179,7 @@ export interface AppState {
   mode: Mode | null;
   plan: {
     intent: string;
-    tasks: { description: string }[];
+    tasks: { description: string; app?: string }[];
     clarifyQuestions: string[];
     tokenCount: number;
     timeMs: number;
@@ -186,6 +187,11 @@ export interface AppState {
   agents: Map<number, AgentRuntime>;
   /** Research agents in spawn order — drives the column layout. */
   researchAgentIds: number[];
+  /** Pre-flight recon agents in spawn order — drives the Discovering view.
+   *  Kept separate from researchAgentIds so the two never cross-render; both
+   *  reuse the same Column timeline machinery. Cleared when the planner's
+   *  `query` event resets state for the run. */
+  reconAgentIds: number[];
   /** Aggregate source count across all agents' tool_results (deduplicated
    *  by host within a result). Rendered in the footer. */
   sourceCount: number;
@@ -247,6 +253,14 @@ export interface AppState {
    *  determines which CTA is highlighted. Null once boot has progressed
    *  past the failure or the recovery succeeded. */
   bootError: { kind: 'llm' | 'reranker'; message: string } | null;
+  /** Per-app participation in the next query, keyed by `manifest.name`.
+   *  `true` = included; `false` = configured-but-excluded (user opted out
+   *  for this session); missing key = treat as included by default. The
+   *  filter is applied at submit time in main.ts; `runQuery`'s
+   *  `appFilter` opt carries the included-names array. Reset to `true`
+   *  on reconfigure (`set_corpus_path`/`set_tavily_key`) — a config
+   *  change is a strong signal of intent to use the app. */
+  participation: Record<string, boolean>;
 }
 
 export const initialState: AppState = {
@@ -258,6 +272,7 @@ export const initialState: AppState = {
   plan: null,
   agents: new Map(),
   researchAgentIds: [],
+  reconAgentIds: [],
   sourceCount: 0,
   synth: { open: false, buffer: '', done: false, stats: null },
   answer: null,
@@ -282,4 +297,5 @@ export const initialState: AppState = {
   scrollback: [],
   corpusStatus: null,
   bootError: null,
+  participation: {},
 };

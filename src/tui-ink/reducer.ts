@@ -12,15 +12,32 @@
 import type { AppState, AgentRuntime, TimelineItem } from './state';
 import { initialState } from './state';
 import type { WorkflowEvent } from './events';
+import type { Config } from './config';
+import { shortPath } from './path-utils';
+
+/** Seed/refresh `participation` from current config. reasoning.run today
+ *  hardcodes two source apps: `web` (always enabled with a keyless
+ *  fallback) and `corpus` (enabled iff a path is set). Configuring (or
+ *  reconfiguring) an app sets its participation to `true` — config
+ *  change is a strong signal of intent. Clearing the corpus path drops
+ *  the entry so the chip falls back to the unconfigured visual.
+ *
+ *  Output is not a source — it's a sink — so it's not seeded here. */
+function seedParticipation(
+  prev: Record<string, boolean>,
+  cfg: Config,
+): Record<string, boolean> {
+  const next = { ...prev };
+  next.web = true;
+  if (cfg.sources.corpusPath) {
+    next.corpus = true;
+  } else {
+    delete next.corpus;
+  }
+  return next;
+}
 
 const THINK_CLOSE = '</think>';
-
-/** "~/foo/harness.json" when possible. Keeps toasts readable in narrow columns. */
-function shortPath(p: string): string {
-  const home = process.env.HOME;
-  if (home && p.startsWith(home)) return '~' + p.slice(home.length);
-  return p;
-}
 
 /** First meaningful line of a think-block body, cleaned up for a title. */
 function extractTitle(body: string): string {
@@ -237,6 +254,7 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         nextToastId: state.nextToastId,
         toast: state.toast,
         scrollback: state.scrollback,
+        participation: state.participation,
         query: ev.query,
         warm: ev.warm,
         phase: 'plan',
@@ -405,7 +423,14 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
       //   → ui:composer → composer
       // If we auto-flipped to 'composer' here, the composer would flash
       // briefly before the first boot-phase event arrived.
-      return { ...state, config: ev.config, configOrigin: ev.origin };
+      // Also seed participation: web is always enabled (keyless fallback);
+      // corpus is enabled iff a path is set. Both default to included.
+      return {
+        ...state,
+        config: ev.config,
+        configOrigin: ev.origin,
+        participation: seedParticipation(state.participation, ev.config),
+      };
 
     case 'config:updated': {
       const toastId = state.nextToastId + 1;
@@ -414,10 +439,14 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         : ev.gitignored
           ? `saved → ${shortPath(ev.savedTo)} (added to .gitignore)`
           : `saved → ${shortPath(ev.savedTo)}`;
+      // Reconfigure = strong signal of intent to use. Auto-include the
+      // newly-(re)configured apps; drop participation entries for apps
+      // whose config was just cleared.
       return {
         ...state,
         config: ev.config,
         configOrigin: ev.origin,
+        participation: seedParticipation(state.participation, ev.config),
         toast: {
           id: toastId,
           message,
@@ -426,6 +455,55 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         nextToastId: toastId,
       };
     }
+
+    case 'participation:toggled': {
+      const current = state.participation[ev.name] ?? true;
+      const next = !current;
+      // Clear the "All sources excluded" error toast on any include — toggling
+      // a source back on is the natural resolution. Drop on exclude too: the
+      // toast was a submit-time complaint about the previous filter, so any
+      // change to the filter invalidates it.
+      return {
+        ...state,
+        participation: { ...state.participation, [ev.name]: next },
+        toast: null,
+      };
+    }
+
+    case 'preflight:start': {
+      // Pre-flight recon runs BEFORE the planner, so it's the first event of a
+      // multi-app query. Reset to a clean run (like the `query` event does) and
+      // enter the discovering phase; the recon agent's stream renders live via
+      // the same Column machinery the research view uses. The planner's later
+      // `query` event resets again before research, so recon agents are
+      // transient — they vanish at the discovering → planning transition.
+      const freshSubmission =
+        state.uiPhase === 'composer' ||
+        state.uiPhase === 'done' ||
+        state.uiPhase === 'boot';
+      return {
+        ...initialState,
+        config: state.config,
+        configOrigin: state.configOrigin,
+        mode: state.mode,
+        nextToastId: state.nextToastId,
+        toast: state.toast,
+        scrollback: state.scrollback,
+        corpusStatus: state.corpusStatus,
+        participation: state.participation,
+        query: ev.query,
+        uiPhase: 'discovering',
+        phase: 'recon',
+        startedAt: Date.now(),
+        pipelineElapsedMs: freshSubmission ? 0 : state.pipelineElapsedMs,
+        pipelineResumedAt: Date.now(),
+      };
+    }
+
+    case 'preflight:done':
+      // Bracket-only — plan:start flips uiPhase to 'planning' next. The probe
+      // detail lives in the recon agent's live stream, not here.
+      return state;
 
     case 'plan:start': {
       // Fresh submission (from composer / done) → reset the pipeline timer
@@ -568,6 +646,22 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
     // ── Agent events ───────────────────────────────────────────
 
     case 'agent:spawn': {
+      // Pre-flight recon agent: stream it through the same timeline machinery
+      // as research (taskIndex 0 so the produce/tool handlers engage), but
+      // track it in reconAgentIds so the research column never picks it up and
+      // agent:return never freezes it into research scrollback.
+      if (state.phase === 'recon') {
+        const next = createAgent(state, ev.agentId, {
+          phase: 'thinking',
+          taskIndex: 0,
+          taskDescription: 'Probing sources',
+        });
+        return openThink(
+          { ...next, reconAgentIds: [...next.reconAgentIds, ev.agentId] },
+          ev.agentId,
+        );
+      }
+
       // Non-research phase: track the agent but don't open a timeline.
       if (state.phase !== 'research') {
         return createAgent(state, ev.agentId, { phase: 'idle', taskIndex: null });
@@ -616,8 +710,9 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
       if (state.phase === 'synth' && state.synth.open) {
         return { ...state, synth: { ...state.synth, buffer: state.synth.buffer + ev.text } };
       }
-      // Muted phases.
-      if (state.phase !== 'research') return state;
+      // Muted phases. 'recon' streams through the same path as 'research'
+      // (its agent has taskIndex 0), so it's allowed past the gate.
+      if (state.phase !== 'research' && state.phase !== 'recon') return state;
 
       const agent = state.agents.get(ev.agentId);
       if (!agent || agent.taskIndex === null) return state;

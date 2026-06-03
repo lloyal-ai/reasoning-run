@@ -816,5 +816,65 @@ check('agent:tick updates pressure', () => {
   assert.equal(s.pressure?.pct, 24);
 });
 
+// ── Pre-flight recon cases ─────────────────────────────────────
+
+check('preflight:start → uiPhase=discovering, phase=recon', () => {
+  const s = drive([
+    { type: 'ui:composer' } as WorkflowEvent,
+    { type: 'preflight:start', query: 'firefox apis', appCount: 2 } as WorkflowEvent,
+  ]);
+  assert.equal(s.uiPhase, 'discovering');
+  assert.equal(s.phase, 'recon');
+  assert.equal(s.query, 'firefox apis');
+  assert.deepEqual(s.reconAgentIds, []);
+});
+
+check('recon agent streams via reconAgentIds, never researchAgentIds', () => {
+  const s = drive([
+    { type: 'preflight:start', query: 'q', appCount: 2 } as WorkflowEvent,
+    { type: 'agent:spawn', agentId: 1, parentAgentId: 0 } as WorkflowEvent,
+    { type: 'agent:produce', agentId: 1, text: 'probing</think>', tokenCount: 2 } as WorkflowEvent,
+    { type: 'agent:tool_call', agentId: 1, tool: 'search', args: '{"query":"firefox"}' } as WorkflowEvent,
+    { type: 'agent:tool_result', agentId: 1, tool: 'search', result: '[]' } as WorkflowEvent,
+  ]);
+  const a = s.agents.get(1)!;
+  assert.deepEqual(s.reconAgentIds, [1]);
+  assert.deepEqual(s.researchAgentIds, []);
+  assert.equal(a.taskIndex, 0);
+  // think + tool_call + tool_result on the timeline (live stream, not muted).
+  assert.equal(a.timeline.filter((it) => it.kind === 'tool_call').length, 1);
+  assert.equal(a.timeline.filter((it) => it.kind === 'tool_result').length, 1);
+});
+
+check('recon agent:return reports without freezing into research scrollback', () => {
+  const s = drive([
+    { type: 'preflight:start', query: 'q', appCount: 2 } as WorkflowEvent,
+    { type: 'agent:spawn', agentId: 1, parentAgentId: 0 } as WorkflowEvent,
+    { type: 'agent:produce', agentId: 1, text: 'done</think>', tokenCount: 2 } as WorkflowEvent,
+    { type: 'agent:return', agentId: 1, result: 'corpus_research: HDK; web_research: firefox' } as WorkflowEvent,
+  ]);
+  const a = s.agents.get(1)!;
+  assert.equal(a.phase, 'done');
+  assert.equal(a.timeline[a.timeline.length - 1].kind, 'report');
+  // Recon is throwaway — not pushed to scrollback (that's research-only).
+  assert.equal(s.scrollback.length, 0);
+  assert.deepEqual(s.reconAgentIds, [1]);
+});
+
+check('discovering → planning hand-off: query event clears recon agents', () => {
+  const s = drive([
+    { type: 'preflight:start', query: 'q', appCount: 2 } as WorkflowEvent,
+    { type: 'agent:spawn', agentId: 1, parentAgentId: 0 } as WorkflowEvent,
+    { type: 'preflight:done', coverage: 'x', tokens: 10, toolCalls: 2, timeMs: 500 } as WorkflowEvent,
+    { type: 'plan:start', query: 'q', mode: 'deep' } as WorkflowEvent,
+    { type: 'query', query: 'q', warm: false },
+  ]);
+  // preflight:done is bracket-only; plan:start flips to planning; query resets.
+  assert.equal(s.uiPhase, 'planning');
+  assert.equal(s.phase, 'plan');
+  assert.deepEqual(s.reconAgentIds, []);
+  assert.equal(s.agents.size, 0);
+});
+
 process.stdout.write('---\n');
 process.stdout.write(process.exitCode ? 'FAILED\n' : 'all passed\n');

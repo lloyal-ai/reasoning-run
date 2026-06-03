@@ -26,8 +26,12 @@ import {
 import type { Operation } from "effection";
 import { createContext } from "@lloyal-labs/lloyal.node";
 import type { SessionContext } from "@lloyal-labs/sdk";
-import { initAgents, JsonlTraceWriter } from "@lloyal-labs/lloyal-agents";
-import type { Source } from "@lloyal-labs/lloyal-agents";
+import {
+  initAgents,
+  JsonlTraceWriter,
+  RerankerCtx,
+} from "@lloyal-labs/lloyal-agents";
+import type { App } from "@lloyal-labs/lloyal-agents";
 import {
   c,
   log,
@@ -42,26 +46,20 @@ import type { WorkflowEvent, Command, Config } from "./tui-ink";
 // otherwise the top-level await in yoga-wasm-web breaks the CJS loader.
 import { loadConfig, saveConfig } from "./tui-ink/config";
 import { createBus, type EventBus } from "./tui-ink/event-bus";
-import { TavilyProvider } from "@lloyal-labs/rig";
-import type {
-  PlanResult,
-  SourceContext,
-  Chunk,
-  Reranker,
-} from "@lloyal-labs/rig";
 import {
-  createReranker,
-  WebSource,
-  CorpusSource,
-  chunkResources,
-  resolveCorpusInput,
-} from "@lloyal-labs/rig/node";
-import type { Resource } from "@lloyal-labs/rig/node";
-import ignoreFactory from "ignore";
+  createInMemoryConfigStore,
+  createAppRegistry,
+} from "@lloyal-labs/rig";
+import type { PlanResult, Reranker } from "@lloyal-labs/rig";
+import { createReranker } from "@lloyal-labs/rig/node";
+import { createWebApp } from "@lloyal-labs/web-app";
+import { createCorpusApp } from "@lloyal-labs/corpus-app";
 import {
   runQuery,
   runResearchPlan,
   singleTaskPlan,
+  createCoverageCache,
+  CoverageCacheCtx,
 } from "./harness";
 import {
   downloadIfMissing,
@@ -162,178 +160,47 @@ if (quietMode) {
 
 const MAX_TOOL_TURNS = 10;
 
-// ── Corpus cache — load resources once per unique corpusPath ─────
+// ── Planner context ──────────────────────────────────────────────
 
-const corpusCache = new Map<
-  string,
-  { resources: Resource[]; chunks: Chunk[] }
->();
-
-/** Effection-aware corpus indexer.
- *
- *  Walks the user's input (directory or glob pattern), reads each `.md`/
- *  `.mdx` file, and builds chunks. Emits `weights:label` events with the
- *  current filename + (i/N) progress per file. Yields to the event loop
- *  via setImmediate between files so Ink can re-render the inline-
- *  updating status line.
- *
- *  Input semantics (delegated to rig's `resolveCorpusInput`):
- *    - `/path/to/dir` → recursive `**\/*.{md,mdx}`, filtered by .gitignore
- *    - `/path/to/dir/*.md` → top-level only (user-supplied pattern)
- *    - `/path/to/dir/**\/*.md` → recursive (user-supplied pattern)
- *    - Other extensions → rig throws
- *
- *  Honors `.gitignore` at the cwd root if present. Cached by input string
- *  so subsequent calls return cached entries without re-walking.
- *
- *  Without the per-file yields the entire walk runs in one synchronous
- *  burst, all the label events queue but Ink only renders the LAST one
- *  — defeating the "show me what's happening" purpose. */
-function* indexCorpus(
-  corpusInput: string,
-  channel: EventBus<WorkflowEvent>,
-): Operation<{
-  resources: Resource[];
-  chunks: Chunk[];
-}> {
-  const existing = corpusCache.get(corpusInput);
-  if (existing) return existing;
-
-  const { cwd, pattern } = resolveCorpusInput(corpusInput);
-  // Plain directory → recursive walk (filtered by .gitignore below).
-  // Glob pattern → use as-is.
-  const effectivePattern = pattern ?? "**/*.{md,mdx}";
-
-  // Honor .gitignore at the cwd root — same semantics as rig's
-  // loadResources. The user's existing .gitignore is the right place
-  // to declare what should never be in scope.
-  const gitignorePath = path.join(cwd, ".gitignore");
-  const ig = fs.existsSync(gitignorePath)
-    ? ignoreFactory().add(fs.readFileSync(gitignorePath, "utf8"))
-    : null;
-
-  const all = fs.globSync(effectivePattern, { cwd }) as string[];
-  const files = (ig ? all.filter((f) => !ig.ignores(f)) : all).sort();
-
-  if (files.length === 0) {
-    // Throw rather than process.exit — callers (boot eager-index + the
-    // /scan command handler) catch this and surface a recoverable toast
-    // so the user can fix the path without restarting. Writing to stderr
-    // mid-Ink-render also corrupts the terminal; throwing keeps output
-    // clean.
-    throw new Error(
-      `No .md(x) files at ${cwd}${pattern ? ` matching ${pattern}` : ''}`,
-    );
-  }
-
-  channel.send({
-    type: 'weights:label',
-    label: `Indexing corpus (${files.length} files)…`,
-  });
-
-  // Read + collect resources, yielding between files so Ink renders the
-  // updating label.
-  const resources: Resource[] = [];
-  for (let i = 0; i < files.length; i++) {
-    const rel = files[i];
-    channel.send({
-      type: 'weights:label',
-      label: `Indexing: ${rel} (${i + 1}/${files.length})`,
-    });
-    yield* call(
-      () =>
-        new Promise<void>((resolve) => {
-          // setImmediate yields to the event loop → Ink re-renders the
-          // label that the previous send queued. Tiny pause per file but
-          // gives the user visible per-file progress.
-          setImmediate(() => {
-            try {
-              resources.push({
-                name: rel,
-                content: fs.readFileSync(path.join(cwd, rel), 'utf8'),
-              });
-            } catch {
-              /* skip unreadable file */
-            }
-            resolve();
-          });
-        }),
-    );
-  }
-
-  // Chunk (parseMarkdown WASM call per file). Same yielding pattern.
-  channel.send({ type: 'weights:label', label: 'Chunking corpus…' });
-  yield* call(
-    () => new Promise<void>((resolve) => setImmediate(resolve)),
-  );
-  const chunks = chunkResources(resources);
-
-  const entry = { resources, chunks };
-  corpusCache.set(corpusInput, entry);
-  return entry;
-}
-
-/** Build a fresh Source[] from the current config. Synchronous —
- *  assumes the corpus is already indexed (call ensureCorpusIndexed
- *  before submit-query paths). WebSource wraps the Tavily client. */
-function buildSources(config: Config): Source<SourceContext, Chunk>[] {
-  const sources: Source<SourceContext, Chunk>[] = [];
-  if (config.sources.corpusPath) {
-    const cached = corpusCache.get(config.sources.corpusPath);
-    if (cached) {
-      sources.push(
-        new CorpusSource(cached.resources, cached.chunks, {
-          grep: { maxResults: 50, lineMaxChars: 200 },
-          readFile: { defaultMaxLines: 100 },
-        }),
-      );
+/** Summarize the registered apps for the planner prompt: the source catalog
+ *  the planner routes against. Lists each source's exact name, its purpose
+ *  (`useWhen`), and the corpus table-of-contents (the corpus app's
+ *  `source.promptData().toc`). With ≥2 sources the planner assigns each task's
+ *  `app` to the source that holds it — grounded by the pre-flight coverage
+ *  probe that runQuery folds into the context alongside this catalog (RFC:
+ *  multi-app composition). */
+function buildPlannerContext(apps: readonly App[]): string {
+  if (apps.length === 0) return "";
+  const lines: string[] = [
+    "Knowledge sources available for this research. Assign each task's `app` to the source that holds it, using its EXACT name below; the pre-flight `Source coverage` probe (when present) is the primary signal for which source covers what.",
+  ];
+  for (const app of apps) {
+    const protocol = app.manifest.protocol;
+    lines.push("", `### ${protocol.name}`, protocol.useWhen);
+    // `promptData` is corpus-specific — duck-type to surface the corpus TOC.
+    const corpus = app.source as { promptData?: () => { toc?: string } };
+    const toc =
+      typeof corpus.promptData === "function" ? corpus.promptData().toc : undefined;
+    if (toc) {
+      lines.push("Files and top-level topics available in this source:", toc);
     }
-  }
-  if (config.sources.tavilyKey) {
-    // TavilyProvider takes the key as a positional string argument.
-    sources.push(
-      new WebSource(new TavilyProvider(config.sources.tavilyKey), {
-        topN: 5,
-        fetch: { maxChars: 3000, topK: 5, timeout: 10_000, tokenBudget: 1200 },
-      }),
-    );
-  }
-  return sources;
-}
-
-/** Summarize attached sources for the planner prompt. Includes the corpus
- *  table-of-contents (same pattern as corpus-worker.eta's `it.toc`) so the
- *  planner can decide research vs. clarify vs. passthrough with full
- *  awareness of what's actually available. */
-function buildPlannerContext(sources: Source<SourceContext, Chunk>[]): string {
-  if (sources.length === 0) return "";
-  const lines: string[] = ["Available research sources:"];
-  let hasWeb = false;
-  for (const s of sources) {
-    // `promptData` isn't declared on Source — it's specific to CorpusSource.
-    // Duck-type check so the planner prompt gets the corpus TOC. Call as
-    // `corpus.promptData()` (not via a detached `pd()` reference) so `this`
-    // binds to the source instance — `_buildToc` is a private method on
-    // CorpusSource and needs `this` to read `_chunks`.
-    const corpus = s as unknown as { promptData?: () => { toc?: string } };
-    if (typeof corpus.promptData === "function") {
-      const data = corpus.promptData();
-      lines.push("", "## Local corpus");
-      lines.push(
-        "Files and top-level topics (full-text searchable via grep/read/search tools):",
-      );
-      if (data.toc) lines.push(data.toc);
-    } else if (s.name === "web") {
-      hasWeb = true;
-    }
-  }
-  if (hasWeb) {
-    lines.push("", "## Web search");
-    lines.push(
-      "web search is available for live web queries (web_search + fetch_page tools).",
-    );
   }
   return lines.join("\n");
+}
+
+// ── Clarify helpers ──────────────────────────────────────────────
+
+/** Render the planner's clarify questions as an assistant-style markdown
+ *  message. Committed to `session.trunk` paired with the user's most recent
+ *  input so subsequent planner forks attend over prior clarify rounds via KV
+ *  inheritance — instead of carrying the exchange as prose in the planner's
+ *  prompt context. */
+function formatClarifyAsAssistantMsg(questions: readonly string[]): string {
+  return [
+    "I need to clarify a few things before researching:",
+    "",
+    ...questions.map((q, i) => `${i + 1}. ${q}`),
+  ].join("\n");
 }
 
 // ── Error helpers ────────────────────────────────────────────────
@@ -608,9 +475,12 @@ main(function* () {
 
           lastFailedKind = "reranker";
           uiChannel.send({ type: "weights:label", label: `Loading ${rerankNameNow}…` });
-          reranker = yield* call(() =>
-            createReranker(rerankModelPathNow, { nSeqMax: 8, nCtx: 16384 }),
-          );
+          // createReranker is an Effection resource() — yield it directly; it
+          // owns its model context and disposes on this scope's exit.
+          reranker = yield* createReranker(rerankModelPathNow, {
+            nSeqMax: 8,
+            nCtx: 16384,
+          });
         } catch (err) {
           if (ctx) {
             try { ctx.dispose?.(); } catch { /* best-effort */ }
@@ -659,13 +529,12 @@ main(function* () {
       // any explicit dispose call in the handler.
       const ctxFinal = ctx;
       const rerankerFinal = reranker;
-      yield* ensure(() => {
-        rerankerFinal.dispose();
-      });
+      // The reranker is an Effection resource (createReranker) and disposes
+      // itself when this iteration's scope exits. ctx is not a resource, so it
+      // keeps its explicit teardown.
       yield* ensure(() => {
         try { ctxFinal.dispose?.(); } catch { /* best-effort */ }
       });
-      uiChannel.send({ type: "weights:done" });
 
       // ── Session + event forwarding ─────────────────────────────
       const runDirSink = new RunDirSink();
@@ -684,29 +553,68 @@ main(function* () {
         }
       });
 
-      // Eager corpus indexing — runs during the 'loading' phase. Tolerates
-      // a stale corpusPath in harness.json (dir deleted, drive unmounted)
-      // by surfacing a toast and continuing.
+      // ── App registry (RFC §5.4) ────────────────────────────────
+      // Apps are born already-bound to the reranker; publish it on RerankerCtx
+      // so the corpus app's factory reads it. The registry owns each app's
+      // detached scope and tears them down on this iteration's scope exit.
+      // It also sets AppRegistryCtx, which the research pool reads to render
+      // the spine and resolve per-spawn tool scope.
+      yield* RerankerCtx.set(rerankerFinal);
+      const configStore = createInMemoryConfigStore();
+      if (liveConfig.sources.tavilyKey) {
+        yield* configStore.set("web", { tavilyKey: liveConfig.sources.tavilyKey });
+      }
       if (liveConfig.sources.corpusPath) {
+        yield* configStore.set("corpus", {
+          corpusPath: liveConfig.sources.corpusPath,
+        });
+      }
+      const registry = yield* createAppRegistry({ configStore });
+
+      // Per-boot preflight-coverage memo. Spans every command-loop iteration
+      // (clarify, change_mode, re-submit), so re-planning the same query
+      // reuses the recon probe instead of re-running it (TICK-004). Torn down
+      // with this iteration's scope on /model or /reranker restart, which is
+      // correct — those can change the enabled-app set.
+      yield* CoverageCacheCtx.set(yield* createCoverageCache());
+
+      // Enable the corpus app first so installed()[0] is corpus when present
+      // (matches the old sources[0] primacy). The factory loads + tokenizes
+      // the corpus during 'loading'; a bad path surfaces a toast and leaves
+      // the app disabled rather than crashing boot.
+      if (liveConfig.sources.corpusPath) {
+        uiChannel.send({ type: "weights:label", label: "Indexing corpus…" });
         try {
-          const indexed = yield* indexCorpus(
-            liveConfig.sources.corpusPath,
-            uiChannel,
-          );
+          const corpusApp = yield* registry.enable(createCorpusApp);
+          const pd = (
+            corpusApp.source as { promptData?: () => { toc?: string } }
+          ).promptData?.();
           uiChannel.send({
             type: "corpus:indexed",
             corpusPath: liveConfig.sources.corpusPath,
-            fileCount: indexed.resources.length,
-            chunkCount: indexed.chunks.length,
+            fileCount: pd?.toc ? pd.toc.split("\n").filter(Boolean).length : 0,
+            chunkCount: 0,
           });
         } catch (err) {
           uiChannel.send({
             type: "ui:error",
-            message: `Corpus disabled: ${(err as Error).message}. Use /scan to fix.`,
+            message: `Corpus disabled: ${errorMessage(err)}. Use /scan to fix.`,
           });
         }
       }
+      // Web is always available: createWebApp falls back to a keyless provider
+      // when no tavilyKey is configured (it reads the key from the config store
+      // set above, or TAVILY_API_KEY, else keyless). Enable it unconditionally.
+      try {
+        yield* registry.enable(createWebApp);
+      } catch (err) {
+        uiChannel.send({
+          type: "ui:error",
+          message: `Web search disabled: ${errorMessage(err)}.`,
+        });
+      }
 
+      uiChannel.send({ type: "weights:done" });
       uiChannel.send({ type: "ui:composer" });
 
       const harnessOpts = {
@@ -726,15 +634,14 @@ main(function* () {
           process.stderr.write("Non-TTY mode requires --query.\n");
           process.exit(2);
         }
-        const sources = buildSources(liveConfig);
-        if (sources.length === 0) {
+        if (registry.enabled().length === 0) {
           process.stderr.write(
             "No source configured. Set TAVILY_API_KEY, pass --corpus <dir>, or store one in harness.json.\n",
           );
           process.exit(2);
         }
         const wallStartMs = performance.now();
-        const result = yield* runQuery(initialQuery, session, sources, reranker, {
+        const result = yield* runQuery(initialQuery, session, {
           ...harnessOpts,
           wallStartMs,
           onStart: () =>
@@ -748,14 +655,10 @@ main(function* () {
         }
         if (result.type === "research_plan") {
           startRunDir(initialQuery, liveConfig.defaults.reasoningMode);
-          yield* runResearchPlan(
-            initialQuery,
-            result.plan,
-            session,
-            sources,
-            reranker,
-            { ...harnessOpts, wallStartMs },
-          );
+          yield* runResearchPlan(initialQuery, result.plan, session, {
+            ...harnessOpts,
+            wallStartMs,
+          });
         }
         return "quit";
       }
@@ -764,28 +667,90 @@ main(function* () {
 
       let pendingPlan: {
         plan: PlanResult;
+        /** The original headline query — the planner's anchor across clarify
+         *  rounds. Stays constant once a query starts; clarify exchanges
+         *  refine it without rewriting it. */
         query: string;
+        /** True once the user has answered at least one clarify round. When
+         *  set, the trunk already carries the user's latest answer as a
+         *  half-turn (via `session.prefillUser` at submit_clarification);
+         *  `runResearchPlan` closes the pair with `session.prefillAssistant`
+         *  instead of `commitTurn`, avoiding a duplicate user-side commit. */
+        clarifyExchanged: boolean;
         mode: "flat" | "deep";
         wallStartMs: number;
+        /** Per-query App-participation subset captured at submit time.
+         *  Threaded through `runResearchPlan` at accept_plan so research
+         *  runs against the same effective-app set the planner saw. */
+        appFilter: readonly string[];
       } | null = null;
+
+      // Per-query App participation. Tracks which enabled apps the user
+      // included in the next query. Mirrored to the UI reducer via the
+      // `participation:toggled` event; the source of truth lives here
+      // because main.ts is what threads `appFilter` into `runQuery` /
+      // `runResearchPlan`. Default: every enabled app is included. The
+      // Composer chip's Space toggle flips a name; reconfiguring an app
+      // (corpus path / tavily key) auto-includes it. Web is always
+      // enabled (keyless fallback) so its participation is always
+      // toggleable by the user.
+      const participation: Record<string, boolean> = {};
+      const seedParticipation = (): void => {
+        for (const app of registry.enabled()) {
+          if (participation[app.manifest.name] === undefined) {
+            participation[app.manifest.name] = true;
+          }
+        }
+      };
+      const currentAppFilter = (): readonly string[] =>
+        registry
+          .enabled()
+          .filter((a) => participation[a.manifest.name] !== false)
+          .map((a) => a.manifest.name);
+      seedParticipation();
 
       // Auto-submit --query only on the first iteration. Restart iterations
       // skip this — the query already ran (or didn't) the first time.
       if (iterCaptured === 0 && initialQuery) {
         const mode = liveConfig.defaults.reasoningMode;
         const wallStartMs = performance.now();
-        const sources = buildSources(liveConfig);
-        const result = yield* runQuery(initialQuery, session, sources, reranker, {
+        const submissionFilter = currentAppFilter();
+        const result = yield* runQuery(initialQuery, session, {
           ...harnessOpts,
           reasoningMode: mode,
           wallStartMs,
+          appFilter: submissionFilter,
           onStart: () => startRunDir(initialQuery, mode),
         });
         if (result.type === "research_plan") {
-          pendingPlan = { plan: result.plan, query: initialQuery, mode, wallStartMs };
+          pendingPlan = {
+            plan: result.plan,
+            query: initialQuery,
+            clarifyExchanged: false,
+            mode,
+            wallStartMs,
+            appFilter: submissionFilter,
+          };
           yield* events.send({ type: "ui:plan_review" });
         } else if (result.type === "clarify") {
-          pendingPlan = { plan: result.plan, query: initialQuery, mode, wallStartMs };
+          // First-round clarify: atomic (query, formattedQs) commit bootstraps
+          // the trunk via the cold path. Subsequent rounds (submit_clarification)
+          // use prefillUser/prefillAssistant split-half so the user's answer
+          // is visible to the planner's next fork via KV before any pairing.
+          yield* call(() =>
+            session.commitTurn(
+              initialQuery,
+              formatClarifyAsAssistantMsg(result.plan.clarifyQuestions),
+            ),
+          );
+          pendingPlan = {
+            plan: result.plan,
+            query: initialQuery,
+            clarifyExchanged: false,
+            mode,
+            wallStartMs,
+            appFilter: submissionFilter,
+          };
         } else {
           yield* events.send({ type: "ui:composer" });
         }
@@ -811,11 +776,20 @@ main(function* () {
             return "restart";
           }
 
+          if (cmd.type === "toggle_participation") {
+            // Per-query App-participation toggle (chip Space). Flip the
+            // local source-of-truth and mirror to the reducer so the
+            // Composer chip re-renders. Defaults to true when absent.
+            const current = participation[cmd.name] ?? true;
+            participation[cmd.name] = !current;
+            yield* events.send({
+              type: "participation:toggled",
+              name: cmd.name,
+            });
+            continue;
+          }
+
           if (cmd.type === "set_tavily_key") {
-            liveConfig = {
-              ...liveConfig,
-              sources: { ...liveConfig.sources, tavilyKey: cmd.key },
-            };
             const saved = saveConfig(
               { sources: { tavilyKey: cmd.key } },
               configPath,
@@ -829,6 +803,27 @@ main(function* () {
             });
             liveConfig = reloaded.config;
             liveOrigin = reloaded.origin;
+            // Swap the web provider in place: the factory reads the key from
+            // the config store at construction (Tavily with a key, keyless
+            // without). Web stays enabled either way.
+            if (registry.byName("web")) yield* registry.disable("web");
+            if (liveConfig.sources.tavilyKey) {
+              yield* configStore.set("web", {
+                tavilyKey: liveConfig.sources.tavilyKey,
+              });
+            } else {
+              yield* configStore.clear("web");
+            }
+            try {
+              yield* registry.enable(createWebApp);
+              // Reconfigure = strong signal of intent; auto-include.
+              participation["web"] = true;
+            } catch (err) {
+              yield* events.send({
+                type: "ui:error",
+                message: `Web search disabled: ${errorMessage(err)}.`,
+              });
+            }
             yield* events.send({
               type: "config:updated",
               config: liveConfig,
@@ -865,34 +860,45 @@ main(function* () {
             });
           } else if (cmd.type === "set_corpus_path") {
             const resolved = cmd.path ? resolvePath(cmd.path) : "";
-            // Validate BEFORE persisting. A bad path that lands in
-            // harness.json bricks every subsequent boot until the user
-            // hand-edits the file. Empty path always succeeds (it clears).
+            // Re-enable the corpus app against the new path. Validate BEFORE
+            // persisting: a bad path that lands in harness.json would disable
+            // corpus on every subsequent boot. Empty path clears + disables.
+            if (registry.byName("corpus")) yield* registry.disable("corpus");
             if (resolved) {
               uiChannel.send({
                 type: "weights:start",
                 label: "Indexing corpus…",
               });
-              let indexed: { resources: unknown[]; chunks: unknown[] };
+              yield* configStore.set("corpus", { corpusPath: resolved });
               try {
-                indexed = yield* indexCorpus(resolved, uiChannel);
+                const corpusApp = yield* registry.enable(createCorpusApp);
+                // Reconfigure = strong signal of intent; auto-include.
+                participation["corpus"] = true;
+                const pd = (
+                  corpusApp.source as { promptData?: () => { toc?: string } }
+                ).promptData?.();
+                uiChannel.send({
+                  type: "corpus:indexed",
+                  corpusPath: resolved,
+                  fileCount: pd?.toc
+                    ? pd.toc.split("\n").filter(Boolean).length
+                    : 0,
+                  chunkCount: 0,
+                });
+                uiChannel.send({ type: "weights:done" });
               } catch (err) {
                 uiChannel.send({ type: "weights:done" });
+                yield* configStore.clear("corpus");
                 yield* events.send({
                   type: "ui:error",
-                  message: `Cannot use ${resolved}: ${(err as Error).message}`,
+                  message: `Cannot use ${resolved}: ${errorMessage(err)}`,
                 });
                 continue;
               }
-              uiChannel.send({
-                type: "corpus:indexed",
-                corpusPath: resolved,
-                fileCount: indexed.resources.length,
-                chunkCount: indexed.chunks.length,
-              });
-              uiChannel.send({ type: "weights:done" });
+            } else {
+              yield* configStore.clear("corpus");
             }
-            // Path validated (or empty) — persist + reload.
+            // Path validated (or cleared) — persist + reload.
             const saved = saveConfig(
               { sources: { corpusPath: resolved } },
               configPath,
@@ -916,11 +922,21 @@ main(function* () {
             });
             if (resolved) yield* events.send({ type: "ui:composer" });
           } else if (cmd.type === "submit_query") {
-            const sources = buildSources(liveConfig);
-            if (sources.length === 0) {
+            if (registry.enabled().length === 0) {
               yield* events.send({
                 type: "ui:error",
                 message: "No source configured. Add Tavily key or corpus path.",
+              });
+              continue;
+            }
+            // 0-effective-sources guard: the user has enabled apps but
+            // toggled all of them off via chip Space. Block submit with
+            // a toast instead of dispatching with an empty appFilter.
+            if (currentAppFilter().length === 0) {
+              yield* events.send({
+                type: "ui:error",
+                message:
+                  "All sources excluded. Tab to a chip and press Space to include at least one.",
               });
               continue;
             }
@@ -949,96 +965,128 @@ main(function* () {
                 tokenCount: plan.tokenCount,
                 timeMs: plan.timeMs,
               });
+              const submissionFilter = currentAppFilter();
               startRunDir(cmd.query, cmd.mode);
-              yield* runResearchPlan(cmd.query, plan, session, sources, reranker, {
+              yield* runResearchPlan(cmd.query, plan, session, {
                 ...harnessOpts,
                 reasoningMode: cmd.mode,
                 wallStartMs,
+                appFilter: submissionFilter,
               });
               yield* events.send({ type: "ui:composer" });
               continue;
             }
-            const result = yield* runQuery(cmd.query, session, sources, reranker, {
+            const submissionFilter = currentAppFilter();
+            const result = yield* runQuery(cmd.query, session, {
               ...harnessOpts,
               reasoningMode: cmd.mode,
-              context: buildPlannerContext(sources),
+              context: buildPlannerContext(registry.enabled()),
               wallStartMs,
+              appFilter: submissionFilter,
               onStart: () => startRunDir(cmd.query, cmd.mode),
             });
             if (result.type === "research_plan") {
               pendingPlan = {
                 plan: result.plan,
                 query: cmd.query,
+                clarifyExchanged: false,
                 mode: cmd.mode,
                 wallStartMs,
+                appFilter: submissionFilter,
               };
               yield* events.send({ type: "ui:plan_review" });
             } else if (result.type === "clarify") {
+              // First-round clarify: atomic (query, formattedQs) commit
+              // bootstraps the trunk via the cold path. Subsequent rounds
+              // use prefillUser/prefillAssistant split-half so the user's
+              // answer is in trunk BEFORE the next planner fork.
+              yield* call(() =>
+                session.commitTurn(
+                  cmd.query,
+                  formatClarifyAsAssistantMsg(result.plan.clarifyQuestions),
+                ),
+              );
               pendingPlan = {
                 plan: result.plan,
                 query: cmd.query,
+                clarifyExchanged: false,
                 mode: cmd.mode,
                 wallStartMs,
+                appFilter: submissionFilter,
               };
               // Stays in clarifying via the plan event.
             } else {
               yield* events.send({ type: "ui:composer" });
             }
           } else if (cmd.type === "submit_clarification" && pendingPlan) {
-            // Re-run the planner with the prior questions and the user's
-            // answer folded into the context. Sources unchanged.
-            const {
-              query: origQuery,
-              plan: priorPlan,
-              mode,
-              wallStartMs,
-            } = pendingPlan;
-            const sources = buildSources(liveConfig);
-            const qa = [
-              "Prior clarification exchange:",
-              ...priorPlan.clarifyQuestions.map((q, i) => `(${i + 1}) ${q}`),
-              "",
-              `User response: ${cmd.answer}`,
-              "",
-              "Use this exchange to proceed with research if possible.",
-            ].join("\n");
-            const result = yield* runQuery(origQuery, session, sources, reranker, {
+            // Q1.5: prefill the user's answer onto the trunk BEFORE running
+            // the planner so the planner's fork inherits the answer via KV.
+            // (Q1 alone committed the prior round's clarify Qs but the user's
+            // answer was deferred to research-completion, leaving the planner
+            // blind to the user's chosen interpretation.) Split-half flow:
+            //
+            //  1. prefillUser(cmd.answer)  — dangling user side on trunk
+            //  2. runQuery → planner re-plans, sees cmd.answer in KV
+            //  3. on result:
+            //     - clarify  → prefillAssistant(formattedQs) closes the pair
+            //     - research → leave dangling; runResearchPlan closes the
+            //                   pair via prefillAssistant when research
+            //                   findings arrive (gated by clarifyExchanged)
+            //     - done     → passthrough handles its own commits
+            const { query: origQuery, mode, wallStartMs, appFilter } = pendingPlan;
+            yield* call(() => session.prefillUser(cmd.answer));
+            const result = yield* runQuery(origQuery, session, {
               ...harnessOpts,
               reasoningMode: mode,
-              context: [buildPlannerContext(sources), qa]
-                .filter(Boolean)
-                .join("\n\n"),
+              context: buildPlannerContext(registry.enabled()),
               wallStartMs,
+              appFilter,
               onStart: () => startRunDir(origQuery, mode),
             });
             if (result.type === "research_plan") {
-              pendingPlan = { plan: result.plan, query: origQuery, mode, wallStartMs };
+              pendingPlan = {
+                ...pendingPlan,
+                plan: result.plan,
+                clarifyExchanged: true,
+              };
               yield* events.send({ type: "ui:plan_review" });
             } else if (result.type === "clarify") {
-              pendingPlan = { plan: result.plan, query: origQuery, mode, wallStartMs };
+              yield* call(() =>
+                session.prefillAssistant(
+                  formatClarifyAsAssistantMsg(result.plan.clarifyQuestions),
+                ),
+              );
+              pendingPlan = {
+                ...pendingPlan,
+                plan: result.plan,
+                clarifyExchanged: true,
+              };
             } else {
               pendingPlan = null;
               yield* events.send({ type: "ui:composer" });
             }
           } else if (cmd.type === "change_mode" && pendingPlan) {
-            const sources = buildSources(liveConfig);
-            const result = yield* runQuery(
-              pendingPlan.query,
-              session,
-              sources,
-              reranker,
-              {
-                ...harnessOpts,
-                reasoningMode: cmd.mode,
-                context: buildPlannerContext(sources),
-                wallStartMs: pendingPlan.wallStartMs,
-                onStart: () => startRunDir(pendingPlan!.query, cmd.mode),
-              },
-            );
+            const result = yield* runQuery(pendingPlan.query, session, {
+              ...harnessOpts,
+              reasoningMode: cmd.mode,
+              context: buildPlannerContext(registry.enabled()),
+              wallStartMs: pendingPlan.wallStartMs,
+              appFilter: pendingPlan.appFilter,
+              onStart: () => startRunDir(pendingPlan!.query, cmd.mode),
+            });
             if (result.type === "research_plan") {
               pendingPlan = { ...pendingPlan, plan: result.plan, mode: cmd.mode };
               yield* events.send({ type: "ui:plan_review" });
             } else if (result.type === "clarify") {
+              // change_mode is a non-conversational re-plan: the user toggled
+              // mode without saying anything new. We DO NOT commit the new
+              // clarify Qs to trunk — the trunk's last assistant turn stays
+              // the prior round's Qs. The UI shows the new Qs from pendingPlan,
+              // and the user's eventual answer (via submit_clarification) will
+              // prefill onto trunk then. Documented edge: planner #N+1 forks
+              // a trunk that holds clarify_Qs_{prior} in KV while the user
+              // answered clarify_Qs_{change_mode_round}; we accept this minor
+              // KV/UI mismatch rather than forge a synthetic user turn.
               pendingPlan = { ...pendingPlan, plan: result.plan, mode: cmd.mode };
             } else {
               pendingPlan = null;
@@ -1050,8 +1098,7 @@ main(function* () {
               yield* events.send({ type: "ui:composer" });
               continue;
             }
-            const sources = buildSources(liveConfig);
-            if (sources.length === 0) {
+            if (registry.enabled().length === 0) {
               yield* events.send({
                 type: "ui:error",
                 message: "No source configured. Add Tavily key or corpus path.",
@@ -1064,12 +1111,16 @@ main(function* () {
               pendingPlan.query,
               pendingPlan.plan,
               session,
-              sources,
-              reranker,
               {
                 ...harnessOpts,
                 reasoningMode: pendingPlan.mode,
                 wallStartMs: pendingPlan.wallStartMs,
+                appFilter: pendingPlan.appFilter,
+                // Q1.5: if a clarify round prefilled the user's answer onto
+                // trunk, runResearchPlan closes the dangling pair via
+                // prefillAssistant. Otherwise (no clarify), it bootstraps the
+                // pair via commitTurn(query, answer).
+                userSidePending: pendingPlan.clarifyExchanged,
               },
             );
             pendingPlan = null;

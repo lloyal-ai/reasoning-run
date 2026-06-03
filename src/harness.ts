@@ -29,12 +29,13 @@
  *      awkward output.
  */
 
-import { call } from "effection";
+import { call, resource, createContext } from "effection";
 import type { Operation } from "effection";
 import type { Session, SessionContext } from "@lloyal-labs/sdk";
 import {
   Ctx,
   Events,
+  AppRegistryCtx,
   agentPool,
   useAgent,
   chain,
@@ -42,35 +43,33 @@ import {
   renderTemplate,
   withSpine,
   DefaultAgentPolicy,
+  ContextPressure,
 } from "@lloyal-labs/lloyal-agents";
-import type { Source, AgentEvent } from "@lloyal-labs/lloyal-agents";
+import type { AgentEvent, App, AgentRenderCtx, Agent } from "@lloyal-labs/lloyal-agents";
 import type { StepEvent, OpTiming } from "./tui-ink";
-import { reportTool, PlanTool } from "@lloyal-labs/rig";
-import type {
-  PlanResult,
-  ResearchTask,
-  Reranker,
-  Chunk,
-  SourceContext,
+import {
+  reportTool,
+  PlanTool,
+  renderSpine,
+  renderAgentPreamble,
 } from "@lloyal-labs/rig";
+import type { PlanResult, ResearchTask } from "@lloyal-labs/rig";
 import { taskToContent } from "@lloyal-labs/rig";
 
 // ── Prompts ─────────────────────────────────────────────────────
 //
 // .eta files are inlined into the published bundle as string constants
 // via esbuild's text loader. At dev time tsx honors the same `*.eta` ->
-// string contract via the eta.d.ts ambient declaration. No
+// string protocol via the eta.d.ts ambient declaration. No
 // fs.readFileSync, no shipped prompts/ directory at runtime.
 
+import PREFLIGHT_RAW from "./prompts/preflight.eta";
+import PREFLIGHT_RECOVER_RAW from "./prompts/preflight-recover.eta";
 import PLAN_RAW from "./prompts/plan.eta";
 import PLAN_FLAT_RAW from "./prompts/plan-flat.eta";
-import FALLBACK_RAW from "./prompts/fallback.eta";
 import RECOVERY_RAW from "./prompts/recovery.eta";
 import SYNTHESIZE_RAW from "./prompts/synthesize.eta";
 import SYNTHESIZE_FLAT_RAW from "./prompts/synthesize-flat.eta";
-import CORPUS_WORKER_RAW from "./prompts/corpus-worker.eta";
-import WEB_WORKER_RAW from "./prompts/web-worker.eta";
-import PLAYBOOKS_RAW from "./prompts/playbooks.eta";
 
 function parsePrompt(raw: string): { system: string; user: string } {
   const trimmed = raw.trim();
@@ -82,15 +81,13 @@ function parsePrompt(raw: string): { system: string; user: string } {
   };
 }
 
+const PREFLIGHT = parsePrompt(PREFLIGHT_RAW);
+const PREFLIGHT_RECOVER = parsePrompt(PREFLIGHT_RECOVER_RAW);
 const PLAN_DEEP = parsePrompt(PLAN_RAW);
 const PLAN_FLAT = parsePrompt(PLAN_FLAT_RAW);
-const FALLBACK = parsePrompt(FALLBACK_RAW);
 const RECOVERY = parsePrompt(RECOVERY_RAW);
 const SYNTHESIZE_DEEP = parsePrompt(SYNTHESIZE_RAW);
 const SYNTHESIZE_FLAT = parsePrompt(SYNTHESIZE_FLAT_RAW);
-const CORPUS_WORKER_TEMPLATE = CORPUS_WORKER_RAW;
-const WEB_WORKER_TEMPLATE = WEB_WORKER_RAW;
-const PLAYBOOKS_TEMPLATE = PLAYBOOKS_RAW;
 
 function createResearchPolicy(): DefaultAgentPolicy {
   return new DefaultAgentPolicy({
@@ -126,6 +123,51 @@ class SynthPolicy extends DefaultAgentPolicy {
   }
 }
 
+/**
+ * Recon turn budget. A pre-flight probe is shallow — ~2 searches per source
+ * then a report. Enforced HARD via {@link ReconPolicy.shouldExit}: the base
+ * policy only soft-nudges on turns ("report now"), which an over-eager recon
+ * agent ignores, looping to the time hard limit (the recon nudge-loop trace).
+ * Sized at 4 so a time-nudged agent gets one more turn to comply with the
+ * report nudge voluntarily before being force-recovered.
+ */
+const RECON_MAX_TURNS = 4;
+
+/**
+ * Recon policy — research policy with a hard turn cap. Past RECON_MAX_TURNS the
+ * pool kills the agent and `recoverInline` extracts its coverage via the recon
+ * recovery prompt, so a probe always terminates with a coverage line instead of
+ * nudge-looping. A voluntary `report` before the cap still produces a clean
+ * result. `shouldExit` is checked before each turn produces, so this preempts
+ * the base policy's soft turn-limit nudge entirely.
+ */
+class ReconPolicy extends DefaultAgentPolicy {
+  override shouldExit(agent: Agent, pressure: ContextPressure): boolean {
+    if (agent.turns >= RECON_MAX_TURNS) return true;
+    return super.shouldExit(agent, pressure);
+  }
+}
+
+function createReconPolicy(): ReconPolicy {
+  return new ReconPolicy({
+    budget: {
+      context: { softLimit: 2048, hardLimit: 1024 },
+      // Sized for the slowest probe path observed in traces: one corpus
+      // `search` reranks the full chunk index and takes ~30-40s, so 60s
+      // soft / 90s hard was too tight and time-nudged after the first
+      // search. 120s soft / 180s hard gives room for ~2 searches before
+      // nudges + the report turn.
+      time: { softLimit: 120_000, hardLimit: 180_000 },
+    },
+    // Recovery extracts coverage from a force-killed probe. Default
+    // `minToolCalls: 2` skips recovery on agents that only got ONE search
+    // dispatched (the rest got nudged away) — which produced empty coverage
+    // for the slow corpus probe. One probe is enough signal for recon.
+    recovery: { prompt: PREFLIGHT_RECOVER, minToolCalls: 1 },
+    terminalToolName: "report",
+  });
+}
+
 // ── Public types ────────────────────────────────────────────────
 
 export type QueryResult =
@@ -149,36 +191,55 @@ export interface RunQueryOpts extends HarnessOpts {
   /** Fires after the clarify gate but before passthrough/research starts.
    *  Used by main.ts to start the run-dir for artifact writes. */
   onStart?: () => void;
+  /** Per-query app subset, by `manifest.name`. When set, the recon,
+   *  planner, and research stages all operate on `registry.enabled()`
+   *  filtered to this list. When omitted, the full enabled set is used
+   *  (preserves prior behavior). The Composer derives this from
+   *  `state.participation` at submit time. */
+  appFilter?: readonly string[];
 }
 
 export interface RunResearchPlanOpts extends HarnessOpts {
   wallStartMs: number;
+  /** Per-query app subset, by `manifest.name`. Mirrors `RunQueryOpts.appFilter`
+   *  for the accept_plan path (where the planner already ran with the filter
+   *  and the research pool needs the same subset). When omitted, the full
+   *  enabled set is used. */
+  appFilter?: readonly string[];
+  /** Q1.5: signals whether the caller already prefilled the user-side of the
+   *  next trunk turn via `session.prefillUser` (true) or left it to
+   *  `runResearchPlan` to commit the full pair (false, default). True after a
+   *  clarify round in which `submit_clarification` exposed the user's answer
+   *  to the planner via KV before invoking it; in that case the trunk has a
+   *  dangling user side and the research-findings commit must use
+   *  `session.prefillAssistant` to close the pair rather than `commitTurn`
+   *  (which would re-emit the user side). */
+  userSidePending?: boolean;
+}
+
+export interface PreflightResult {
+  /** Prose per-entity coverage summary the recon agent reported. Empty when
+   *  the agent produced nothing usable. */
+  coverage: string;
+  tokens: number;
+  toolCalls: number;
+  timeMs: number;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-interface WorkerPromptCtx extends Record<string, unknown> {
-  maxTurns: number;
-  agentCount: number;
-  siblingTasks: string[];
-  date: string;
-  taskIndex?: number;
-}
-
-function renderWorkerPrompt(
-  source: { name: string; promptData?: () => { toc: string } },
-  ctx: WorkerPromptCtx,
-): string {
-  if (source.promptData) {
-    return renderTemplate(CORPUS_WORKER_TEMPLATE, {
-      ...source.promptData(),
-      ...ctx,
-    });
-  }
-  if (source.name === "web") {
-    return renderTemplate(WEB_WORKER_TEMPLATE, ctx);
-  }
-  return FALLBACK.system;
+/**
+ * Per-spawn preamble for an agent assigned to `app`. `renderAgentPreamble`
+ * prepends the boundary marker and renders the app's `skill.eta`; we merge the
+ * app's own `source.promptData()` (corpus supplies `it.toc`; web supplies
+ * nothing) into the render context, exactly as the old `renderWorkerPrompt`
+ * spread `source.promptData()` into ctx.
+ */
+function appPreamble(app: App, ctx: AgentRenderCtx): string {
+  const extra =
+    (app.source as { promptData?: () => Record<string, unknown> }).promptData?.() ??
+    {};
+  return renderAgentPreamble(app, { ...ctx, ...extra });
 }
 
 function today(): string {
@@ -188,6 +249,26 @@ function today(): string {
 function startTimer(): () => number {
   const start = performance.now();
   return () => performance.now() - start;
+}
+
+/**
+ * Resolve the effective App set for the current operation. Returns
+ * `registry.enabled()` filtered by `appFilter` (by `manifest.name`) when
+ * the caller passes one; otherwise returns the full enabled set.
+ *
+ * The filter is the per-query App-participation knob: the Composer
+ * derives it from `state.participation` at submit time and threads it
+ * through `RunQueryOpts.appFilter` / `RunResearchPlanOpts.appFilter`.
+ * All in-harness consumers (recon, planner-context, research pool) call
+ * this instead of `registry.enabled()` directly so the filter applies
+ * uniformly.
+ */
+function* effectiveApps(filter?: readonly string[]): Operation<readonly App[]> {
+  const registry = yield* AppRegistryCtx.expect();
+  const all = registry.enabled();
+  if (!filter) return all;
+  const allow = new Set(filter);
+  return all.filter((a) => allow.has(a.manifest.name));
 }
 
 /**
@@ -246,13 +327,192 @@ function* runPassthrough(
 }
 
 /**
+ * Pre-flight recon. One probe agent PER enabled app runs in parallel — the
+ * same `agentPool` + `parallel` machinery the research pool uses — each
+ * searching its OWN source for the query's entities and reporting which parts
+ * that source covers. The joined coverage grounds the planner's per-task `app`
+ * routing (RFC: multi-app composition — route by *trying* the apps, not blind
+ * `useWhen`).
+ *
+ * Runs only when ≥2 apps are installed (nothing to route between otherwise).
+ * Each agent is hard-capped at {@link RECON_MAX_TURNS} via {@link ReconPolicy}:
+ * past the cap the pool kills + recovers it (coverage from what it saw) rather
+ * than soft-nudge-looping. Probe calls stream as `agent:*` events, so the UI
+ * shows discovery live. Recon is throwaway — its retrievals aren't reused by
+ * the research agents (they re-search deeper); only the coverage feeds forward.
+ */
+export function* runPreflight(
+  query: string,
+  session: Session,
+  filter?: readonly string[],
+): Operation<PreflightResult> {
+  const events = yield* Events.expect();
+  const send = (ev: StepEvent): Operation<void> =>
+    events.send(ev as unknown as AgentEvent);
+
+  const apps = yield* effectiveApps(filter);
+
+  yield* send({ type: "preflight:start", query, appCount: apps.length });
+  const timer = startTimer();
+
+  const reconTools = [...apps.flatMap((a) => [...a.tools]), reportTool];
+  const spinePrompt = renderSpine({ apps });
+  const currentDate = today();
+
+  const { coverage, tokens, toolCalls } = yield* withSpine<{
+    coverage: string;
+    tokens: number;
+    toolCalls: number;
+  }>(
+    {
+      parent: session.trunk ?? undefined,
+      systemPrompt: spinePrompt,
+      tools: reconTools,
+    },
+    function* (reconSpine) {
+      const probe = yield* agentPool({
+        tools: reconTools,
+        parent: reconSpine,
+        terminal: reportTool,
+        maxTurns: RECON_MAX_TURNS,
+        pruneOnReturn: true,
+        policy: createReconPolicy(),
+        enableThinking: true,
+        orchestrate: parallel(
+          apps.map((app, i) => ({
+            content: renderTemplate(PREFLIGHT.user, {
+              query,
+              date: currentDate,
+              app: {
+                name: app.manifest.protocol.name,
+                useWhen: app.manifest.protocol.useWhen,
+                tools: app.manifest.protocol.tools,
+                // Surface the source's content advert so the recon agent
+                // can recognize what each source actually contains BEFORE
+                // probing — fixes TICK-005 (corpus probe agent reading
+                // HDK chunks as "Lloyal platform stuff" because it didn't
+                // know the corpus IS the HDK docs). Duck-typed because
+                // not every source implements promptData (web doesn't).
+                // Graduates to Source.describe() framework affordance in
+                // TICK-018; for now reasoning.run pulls it directly.
+                contents:
+                  (app.source as { promptData?: () => { toc?: string } })
+                    .promptData?.()?.toc ?? null,
+              },
+            }),
+            systemPrompt: PREFLIGHT.system,
+            assignedApp: app.manifest.name,
+            seed: 2000 + i,
+          })),
+        ),
+      });
+
+      // Join each source's coverage under its protocol name so the planner can
+      // see which source holds what. Agents align with `apps` by spawn order.
+      const lines = probe.agents
+        .map((a, i) => {
+          const name = apps[i]?.manifest.protocol.name ?? `source ${i + 1}`;
+          const body = a.result?.trim();
+          return body ? `### ${name}\n${body}` : null;
+        })
+        .filter((l): l is string => l !== null);
+
+      return {
+        coverage: lines.join("\n\n"),
+        tokens: probe.totalTokens,
+        toolCalls: probe.totalToolCalls,
+      };
+    },
+  );
+
+  const result: PreflightResult = { coverage, tokens, toolCalls, timeMs: timer() };
+  yield* send({
+    type: "preflight:done",
+    coverage,
+    tokens: result.tokens,
+    toolCalls: result.toolCalls,
+    timeMs: result.timeMs,
+  });
+  return result;
+}
+
+/**
+ * Memoizes preflight coverage for the lifetime of the boot session.
+ *
+ * Coverage is a pure function of `(query, enabledApps)`; the enabled-app
+ * set is constant within a boot scope (a `/model` or `/reranker` change
+ * unwinds that scope and rebuilds the cache), so `query` alone is a sufficient
+ * key. This is what lets a clarify-answer or change_mode re-invoke
+ * `runQuery(sameQuery)` without re-running the ~170 s recon probe — the second
+ * call hits the memo. See TICK-004 (and TICK-014, subsumed).
+ */
+export interface CoverageCache {
+  getOrCompute(
+    query: string,
+    compute: () => Operation<PreflightResult>,
+  ): Operation<PreflightResult>;
+}
+
+/**
+ * Construct a per-boot coverage cache. Created once at the command-loop scope
+ * via `CoverageCacheCtx.set` and cleared on scope teardown.
+ */
+export function createCoverageCache(): Operation<CoverageCache> {
+  return resource(function* (provide) {
+    const memo = new Map<string, PreflightResult>();
+    try {
+      yield* provide({
+        *getOrCompute(query, compute) {
+          const hit = memo.get(query);
+          if (hit) return hit; // reuse — `compute` (which emits preflight:* events) never fires
+          const fresh = yield* compute();
+          memo.set(query, fresh);
+          return fresh;
+        },
+      });
+    } finally {
+      memo.clear();
+    }
+  });
+}
+
+export const CoverageCacheCtx = createContext<CoverageCache>(
+  "reasoning.coverageCache",
+);
+
+/**
+ * Resolve preflight coverage for `query`, computing it at most once per
+ * boot session. The ≥2-app gate lives here (a single source has nothing to
+ * route between, so coverage is empty and no probe runs). The caller folds
+ * the returned prose into the planner context.
+ */
+export function* useCoverage(
+  query: string,
+  session: Session,
+  filter?: readonly string[],
+): Operation<PreflightResult> {
+  const apps = yield* effectiveApps(filter);
+  if (apps.length < 2) {
+    return { coverage: "", tokens: 0, toolCalls: 0, timeMs: 0 };
+  }
+  const cache = yield* CoverageCacheCtx.expect();
+  // Compose the cache key from query + sorted filter so distinct
+  // participation subsets get distinct cached coverage. Same query +
+  // same subset across clarify rounds still hits the cache.
+  const key = filter
+    ? `${query}|${[...filter].sort().join(",")}`
+    : query;
+  return yield* cache.getOrCompute(key, () => runPreflight(query, session, filter));
+}
+
+/**
  * Run the planner LLM. Emits a `query` event and a `plan` event.
  * Returns the raw PlanResult so callers can route based on intent.
  */
 export function* runPlanner(
   query: string,
   session: Session,
-  opts: { reasoningMode: "flat" | "deep"; context?: string },
+  opts: { reasoningMode: "flat" | "deep"; context?: string; appFilter?: readonly string[] },
 ): Operation<PlanResult> {
   const events = yield* Events.expect();
   const send = (ev: StepEvent): Operation<void> =>
@@ -262,10 +522,25 @@ export function* runPlanner(
 
   const currentDate = today();
   const planPrompt = opts.reasoningMode === "flat" ? PLAN_FLAT : PLAN_DEEP;
+  // Grounded planner routing (RFC: multi-app composition). With ≥2 apps the
+  // pre-flight recon agent has already probed each source and folded a coverage
+  // summary into `opts.context`; passing `availableApps` re-adds the per-task
+  // `app` enum to the plan grammar so the planner assigns each task to the
+  // source the coverage shows holds it — evidence-grounded, not blind `useWhen`.
+  // `appForTask` in runResearchPlan consumes `task.app`. With <2 apps there is
+  // nothing to route between, so the field is dropped and tasks fall back to the
+  // primary app + open reads (authGuard).
+  const apps = yield* effectiveApps(opts.appFilter);
   const planTool = new PlanTool({
     prompt: planPrompt,
     session,
-    maxQuestions: 10,
+    // Caps the tasks-array `maxItems` (grammar-enforced) and the `it.count`
+    // rendered into the planner prompt. 6 is the upper bound that survives
+    // the 8-agent shared-spine overflow seen in
+    // trace-2026-06-01T07-46-17-924 (8 corpus-heavy tasks → all agents
+    // softcut/settle-reject, no recovery, empty synth).
+    maxTasks: 6,
+    availableApps: apps.length >= 2 ? apps : undefined,
   });
   const planContext = opts.context
     ? `Today's date: ${currentDate}\n\n${opts.context}`
@@ -307,13 +582,41 @@ export function* runPlanner(
 export function* runQuery(
   query: string,
   session: Session,
-  sources: Source<SourceContext, Chunk>[],
-  reranker: Reranker,
   opts: RunQueryOpts,
 ): Operation<QueryResult> {
   const events = yield* Events.expect();
   const send = (ev: StepEvent): Operation<void> =>
     events.send(ev as unknown as AgentEvent);
+
+  // Defensive guard: empty `appFilter` is a programming error — the
+  // Composer's submit handler blocks zero-source submission with a
+  // toast, so reaching here with [] means the auto-submit `--query`
+  // path or a future caller forgot the same check. Fail loudly.
+  if (opts.appFilter && opts.appFilter.length === 0) {
+    throw new Error(
+      "runQuery: appFilter is an empty array — at least one source must be included.",
+    );
+  }
+
+  // Pre-flight recon (RFC: multi-app composition). Probe each source for the
+  // query's entities BEFORE planning and fold the coverage summary into the
+  // planner context — that's what makes the planner's per-task `app` routing
+  // grounded rather than blind. `useCoverage` memoizes per `(query, appFilter)`
+  // for the boot session, so a clarify-answer / change_mode re-invocation of
+  // `runQuery` with the same filter reuses the probe instead of re-running
+  // it; it also applies the ≥2-app gate internally (a single effective source
+  // has nothing to route between → empty coverage).
+  const preflight = yield* useCoverage(query, session, opts.appFilter);
+  let plannerContext = opts.context;
+  if (preflight.coverage) {
+    const coverageSection =
+      "Source coverage (from a pre-flight probe of each source for this query — " +
+      "use it as the primary signal when assigning each task's `app`):\n" +
+      preflight.coverage;
+    plannerContext = [opts.context, coverageSection]
+      .filter(Boolean)
+      .join("\n\n");
+  }
 
   yield* send({
     type: "plan:start",
@@ -323,7 +626,8 @@ export function* runQuery(
 
   const plan = yield* runPlanner(query, session, {
     reasoningMode: opts.reasoningMode,
-    context: opts.context,
+    context: plannerContext,
+    appFilter: opts.appFilter,
   });
 
   if (plan.intent === "clarify") {
@@ -338,9 +642,7 @@ export function* runQuery(
     if (!session.trunk) {
       const fallbackPlan = singleTaskPlan(query);
       opts.onStart?.();
-      yield* runResearchPlan(query, fallbackPlan, session, sources, reranker, {
-        ...opts,
-      });
+      yield* runResearchPlan(query, fallbackPlan, session, { ...opts });
       return { type: "done" };
     }
     opts.onStart?.();
@@ -370,8 +672,6 @@ export function* runResearchPlan(
   query: string,
   plan: PlanResult,
   session: Session,
-  sources: Source<SourceContext, Chunk>[],
-  reranker: Reranker,
   opts: RunResearchPlanOpts,
 ): Operation<void> {
   if (plan.intent !== "research") {
@@ -394,23 +694,27 @@ export function* runResearchPlan(
   });
   const researchTimer = startTimer();
 
-  for (const source of sources) yield* source.bind({ reranker });
-  const scorers = new Map(sources.map((s) => [s, s.createScorer(query)]));
-  const allDataTools = sources.flatMap((s) => s.tools);
-  const primarySource = sources[0];
-  const primaryScorer = scorers.get(primarySource)!;
-
-  const hasWeb = sources.some((s) => s.name === "web");
-  const hasCorpus = sources.some(
-    (s) =>
-      typeof (s as unknown as { promptData?: () => unknown }).promptData ===
-      "function",
-  );
-  const playbooks = renderTemplate(PLAYBOOKS_TEMPLATE, {
-    hasWeb,
-    hasCorpus,
-  });
-  const researchTools = [...allDataTools, reportTool];
+  // App protocol: the registry (set on AppRegistryCtx by createAppRegistry at
+  // boot) is the source of truth. Apps are born already-bound to the reranker
+  // (no source.bind step). The spine carries every app's catalog metadata AND
+  // every app's tools (`researchTools` below), so each agent can read across
+  // ALL apps — routing dissolves at execution time (RFC §3.2 M2 authGuard:
+  // read tools are open; only `protected` tools are grant-gated, and these
+  // apps have none). `task.app` is now a soft routing hint, not a tool lock:
+  // it selects which app's preamble (skill.eta) the agent gets and drives the
+  // per-task UI chip; the model is free to pivot to another app's read tools
+  // mid-task. App-agnostic tasks fall back to the primary.
+  const apps = yield* effectiveApps(opts.appFilter);
+  const primaryApp = apps[0];
+  const byProtocol = new Map(apps.map((a) => [a.manifest.protocol.name, a]));
+  const appForTask = (task: ResearchTask): App =>
+    (task.app ? byProtocol.get(task.app) : undefined) ?? primaryApp;
+  // The scorer is reranker-backed and the reranker is shared across all apps
+  // (RerankerCtx), so one pool-level scorer is equivalent regardless of which
+  // app a given agent is assigned.
+  const primaryScorer = primaryApp.source.createScorer(query);
+  const researchTools = [...apps.flatMap((a) => [...a.tools]), reportTool];
+  const spinePrompt = renderSpine({ apps });
 
   let synthTimeMs = 0;
   let researchTimeMs = 0;
@@ -428,7 +732,7 @@ export function* runResearchPlan(
   }>(
     {
       parent: session.trunk ?? undefined,
-      systemPrompt: playbooks,
+      systemPrompt: spinePrompt,
       tools: researchTools,
     },
     function* (querySpine) {
@@ -439,7 +743,7 @@ export function* runResearchPlan(
       const research = yield* agentPool({
         tools: researchTools,
         parent: querySpine,
-        terminalToolName: "report",
+        terminal: reportTool,
         maxTurns: opts.maxTurns,
         pruneOnReturn: true,
         policy: createResearchPolicy(),
@@ -448,54 +752,62 @@ export function* runResearchPlan(
         orchestrate:
           opts.reasoningMode === "flat"
             ? parallel(
-                tasks.map((task: ResearchTask, i: number) => ({
-                  content: taskToContent(task),
-                  systemPrompt: renderWorkerPrompt(primarySource, {
-                    maxTurns: opts.maxTurns,
-                    agentCount: tasks.length,
-                    siblingTasks: tasks
-                      .filter((_, j) => j !== i)
-                      .map((t) => t.description),
-                    date: currentDate,
-                    taskIndex: 0,
-                  }),
-                  seed: 1000 + i,
-                })),
+                tasks.map((task: ResearchTask, i: number) => {
+                  const app = appForTask(task);
+                  return {
+                    content: taskToContent(task),
+                    systemPrompt: appPreamble(app, {
+                      maxTurns: opts.maxTurns,
+                      agentCount: tasks.length,
+                      siblingTasks: tasks
+                        .filter((_, j) => j !== i)
+                        .map((t) => t.description),
+                      date: currentDate,
+                      taskIndex: 0,
+                    }),
+                    assignedApp: app.manifest.name,
+                    seed: 1000 + i,
+                  };
+                }),
               )
-            : chain(tasks, (task: ResearchTask, i: number) => ({
-                task: {
-                  content: taskToContent(task),
-                  systemPrompt: renderWorkerPrompt(primarySource, {
-                    maxTurns: opts.maxTurns,
-                    agentCount: 1,
-                    siblingTasks: [],
-                    date: currentDate,
-                    taskIndex: i,
-                  }),
-                },
-                userContent: `Research task: ${task.description}`,
-                beforeSpawn: function* () {
-                  yield* send({
-                    type: "spine:task",
-                    taskIndex: i,
-                    taskCount: tasks.length,
-                    description: task.description,
-                  });
-                  yield* send({
-                    type: "spine:source",
-                    taskIndex: i,
-                    source: primarySource.name,
-                  });
-                },
-                afterExtend: function* (delta: number, position: number) {
-                  yield* send({
-                    type: "spine:task:done",
-                    taskIndex: i,
-                    stageFindings: delta,
-                    accumulated: position,
-                  });
-                },
-              })),
+            : chain(tasks, (task: ResearchTask, i: number) => {
+                const app = appForTask(task);
+                return {
+                  task: {
+                    content: taskToContent(task),
+                    systemPrompt: appPreamble(app, {
+                      maxTurns: opts.maxTurns,
+                      agentCount: 1,
+                      siblingTasks: [],
+                      date: currentDate,
+                      taskIndex: i,
+                    }),
+                    assignedApp: app.manifest.name,
+                  },
+                  userContent: `Research task: ${task.description}`,
+                  beforeSpawn: function* () {
+                    yield* send({
+                      type: "spine:task",
+                      taskIndex: i,
+                      taskCount: tasks.length,
+                      description: task.description,
+                    });
+                    yield* send({
+                      type: "spine:source",
+                      taskIndex: i,
+                      source: app.source.name,
+                    });
+                  },
+                  afterExtend: function* (delta: number, position: number) {
+                    yield* send({
+                      type: "spine:task:done",
+                      taskIndex: i,
+                      stageFindings: delta,
+                      accumulated: position,
+                    });
+                  },
+                };
+              }),
       });
 
       // Emit research:done HERE — before synth starts — so the flat-mode
@@ -572,7 +884,17 @@ export function* runResearchPlan(
   );
 
   yield* send({ type: "answer", text: answer });
-  if (answer) yield* call(() => session.commitTurn(query, answer));
+  if (answer) {
+    if (opts.userSidePending) {
+      // Clarify path: user-side already on trunk via prefillUser; close the
+      // dangling pair by appending the assistant side only.
+      yield* call(() => session.prefillAssistant(answer));
+    } else {
+      // No-clarify path (START or first-shot accept_plan): bootstrap or
+      // append the full (query, answer) pair atomically.
+      yield* call(() => session.commitTurn(query, answer));
+    }
+  }
 
   yield* finalizeResearch({
     plan,

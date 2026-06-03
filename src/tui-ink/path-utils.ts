@@ -33,3 +33,16 @@ export function resolvePath(input: string): string {
         : input;
   return path.resolve(expanded);
 }
+
+/** Inverse of resolvePath for display: collapse a home-prefixed absolute
+ *  path back to `~/...`. Returns the input unchanged for paths outside
+ *  $HOME or when $HOME is unset. Keeps narrow-column UI (chips, toasts)
+ *  readable when the user's outputDir / corpusPath sits under home. */
+export function shortPath(p: string): string {
+  if (!p) return p;
+  const home = os.homedir();
+  if (home && (p === home || p.startsWith(home + path.sep))) {
+    return '~' + p.slice(home.length);
+  }
+  return p;
+}

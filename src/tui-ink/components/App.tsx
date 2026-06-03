@@ -14,6 +14,7 @@ import { Footer } from './Footer';
 import { Composer } from './Composer';
 import { PlanReview } from './PlanReview';
 import { PlanningSpinner } from './PlanningSpinner';
+import { Discovering } from './Discovering';
 import { ClarifyPanel } from './ClarifyPanel';
 import { BootStatus } from './BootStatus';
 
@@ -34,6 +35,7 @@ export function App({ bus, dispatch, bootstrap }: AppProps): React.ReactElement 
     state.uiPhase !== 'boot' &&
     state.uiPhase !== 'downloading' &&
     state.uiPhase !== 'loading' &&
+    state.uiPhase !== 'discovering' &&
     state.uiPhase !== 'planning' &&
     state.uiPhase !== 'plan_review' &&
     state.uiPhase !== 'clarifying';  // components below render their own header
@@ -74,6 +76,7 @@ export function App({ bus, dispatch, bootstrap }: AppProps): React.ReactElement 
           state.uiPhase === 'boot_error') && (
           <BootStatus state={state} />
         )}
+        {state.uiPhase === 'discovering' && <Discovering state={state} />}
         {state.uiPhase === 'planning' && <PlanningSpinner state={state} />}
         {state.uiPhase === 'plan_review' && <PlanReview state={state} />}
         {state.uiPhase === 'clarifying' && <ClarifyPanel state={state} />}

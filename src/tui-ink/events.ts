@@ -57,6 +57,18 @@ export type StepEvent =
       gitignored: boolean;
       skipped: string[];
     }
+  // ── Pre-flight recon (RFC: multi-app composition) — a recon agent probes
+  // ── each source for the query's entities BEFORE planning to ground routing.
+  // ── Its probe calls also stream as agent:* events (rendered live), so these
+  // ── two only bracket the phase; the per-probe detail is the agent stream.
+  | { type: 'preflight:start'; query: string; appCount: number }
+  | {
+      type: 'preflight:done';
+      coverage: string;
+      tokens: number;
+      toolCalls: number;
+      timeMs: number;
+    }
   | { type: 'plan:start'; query: string; mode: 'flat' | 'deep' }
   // ── Plan-edit events: user-driven mutations of state.plan.tasks before
   // ── accept_plan. afterIndex: -1 means prepend; out-of-bounds indices
@@ -80,6 +92,12 @@ export type StepEvent =
   | { type: 'weights:label'; label: string }
   | { type: 'weights:done' }
   | { type: 'corpus:indexed'; corpusPath: string; fileCount: number; chunkCount: number }
-  | { type: 'boot:error'; kind: 'llm' | 'reranker'; message: string };
+  | { type: 'boot:error'; kind: 'llm' | 'reranker'; message: string }
+  // Per-query App participation toggle. Emitted by main.ts in response to
+  // a `toggle_participation` Command from the Composer. The reducer flips
+  // the bit in `state.participation[name]`. Pure UI state — no harness
+  // side effects; main.ts derives `appFilter` from `state.participation`
+  // at submit time and threads it into runQuery / runResearchPlan.
+  | { type: 'participation:toggled'; name: string };
 
 export type WorkflowEvent = AgentEvent | StepEvent;

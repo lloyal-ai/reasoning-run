@@ -253,6 +253,7 @@ export const PlanReview = memo(function PlanReview({ state }: PlanReviewProps): 
             key={i}
             index={i}
             description={t.description}
+            app={t.app}
             focused={i === focusedIndex}
             editing={i === editingIndex}
             draft={draft}
@@ -319,6 +320,7 @@ const StartButton = memo(function StartButton({
 interface PlanRowProps {
   index: number;
   description: string;
+  app?: string;
   focused: boolean;
   editing: boolean;
   draft: string;
@@ -330,6 +332,7 @@ interface PlanRowProps {
 const PlanRow = memo(function PlanRow({
   index,
   description,
+  app,
   focused,
   editing,
   draft,
@@ -354,11 +357,15 @@ const PlanRow = memo(function PlanRow({
       </Box>
     );
   }
+  // Per-task assigned app (the contract the planner routed this task to),
+  // shown in both flat and deep modes.
+  const appTag = app ? <Text color="magenta">{` [${app}]`}</Text> : null;
   if (focused) {
     return (
       <Box paddingLeft={2}>
         <Text color="cyan" bold>{`› ${index + 1}. `}</Text>
         <Text bold>{description || <Text dimColor>(empty)</Text>}</Text>
+        {appTag}
       </Box>
     );
   }
@@ -366,6 +373,7 @@ const PlanRow = memo(function PlanRow({
     <Box paddingLeft={2}>
       <Text dimColor>{`  ${index + 1}. `}</Text>
       <Text dimColor>{description || '(empty)'}</Text>
+      {appTag}
     </Box>
   );
 });

@@ -29,11 +29,12 @@
  *   Ctrl-C     → quit.
  */
 
-import React, { memo, useEffect, useState } from 'react';
+import React, { memo, useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { AppState } from '../state';
 import { useCommand } from '../hooks/useCommand';
 import { TextInput } from './TextInput';
+import { shortPath } from '../path-utils';
 
 type Field = 'query' | 'web' | 'scan' | 'output' | 'model' | 'reranker';
 
@@ -115,6 +116,29 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
   const [submitMode, setSubmitMode] = useState<'plan' | 'start'>(
     hasReport ? 'start' : 'plan',
   );
+  /** Chip focus for Tab-cycle. `null` means the query text field is
+   *  focused (default). Each chip name corresponds to a source app
+   *  (`'web'`, `'corpus'`) or a setting (`'output'`). When non-null,
+   *  Space toggles participation on a source chip (or opens config if
+   *  unconfigured); Enter opens the inline config editor; Esc returns
+   *  focus to the query text field. */
+  const [chipFocus, setChipFocus] = useState<'web' | 'corpus' | 'output' | null>(null);
+  // Ref-mirror of chipFocus + config-derived inputs so the chip useInput
+  // handler reads fresh values. Ink 7's useInput closure goes stale under
+  // React 19's useEffectEvent (same workaround as PlanReview.tsx).
+  const chipStateRef = useRef<{
+    chipFocus: typeof chipFocus;
+    tavilyKey: string;
+    corpusPath: string;
+    outputDir: string;
+    envLocked: boolean;
+  }>({
+    chipFocus,
+    tavilyKey: state.config?.sources.tavilyKey ?? '',
+    corpusPath: state.config?.sources.corpusPath ?? '',
+    outputDir: state.config?.sources.outputDir ?? '',
+    envLocked: false,
+  });
 
   // When the first report's content lands in scrollback, flip the
   // default. Subsequent user toggles via Shift+Tab override this.
@@ -140,9 +164,20 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
   const corpusOrigin = state.configOrigin?.corpusPath ?? 'unset';
   const outputOrigin = state.configOrigin?.outputDir ?? 'default';
   const hasTavily = tavilyOrigin !== 'unset';
-  const hasCorpus = corpusOrigin !== 'unset';
-  const hasSource = hasTavily || hasCorpus;
+  // Web is always available — the web app falls back to a keyless provider when
+  // no Tavily key is set — so there is always at least one research source.
+  const hasSource = true;
   const envLocked = tavilyOrigin === 'env';
+
+  // Re-mirror chip state into the ref every render so the chip useInput
+  // handler always sees fresh values (closure stale-read workaround).
+  chipStateRef.current = {
+    chipFocus,
+    tavilyKey: state.config?.sources.tavilyKey ?? '',
+    corpusPath: state.config?.sources.corpusPath ?? '',
+    outputDir: state.config?.sources.outputDir ?? '',
+    envLocked,
+  };
 
   const clarifying = state.clarifyContext !== null;
   const parsedSlash = parseSlash(query);
@@ -173,9 +208,19 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
           setQuery('/' + cmd.name + (cmd.kind === 'value' ? ' ' : ''));
           return;
         }
-        // Tab outside slash mode is a no-op now that reasoning mode
-        // (Deep/Flat) is chosen on the PlanReview screen via T-toggle,
-        // not in the composer.
+        // Tab outside slash mode advances chip focus. Cycle order:
+        //   query → web → scan → output → query
+        // Allows the user to Tab to a source chip and Space-toggle its
+        // participation without leaving the keyboard.
+        if (!inSlash && !clarifying) {
+          setChipFocus('web');
+        }
+        return;
+      }
+      // Down-arrow drops focus from the query field into the chip row.
+      // Familiar from form UIs: query is the "top row," chips sit below.
+      if (key.downArrow && !inSlash && !clarifying) {
+        setChipFocus('web');
         return;
       }
       if (key.escape) {
@@ -190,7 +235,96 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         return;
       }
     },
-    { isActive: field === 'query' },
+    { isActive: field === 'query' && chipFocus === null },
+  );
+
+  // Chip-focus input handling: active when a source/setting chip is the
+  // current Tab target. Tab cycles to the next chip (or back to query).
+  // Space toggles participation on a source chip (or opens config if
+  // unconfigured). Enter opens the inline config editor. Esc returns
+  // focus to the query field.
+  useInput(
+    (input, key) => {
+      // Read all state through the ref — Ink 7's useInput closure goes
+      // stale otherwise (same pattern as PlanReview).
+      const s = chipStateRef.current;
+      if (key.ctrl && input === 'c') {
+        dispatch({ type: 'quit' });
+        return;
+      }
+      if (key.escape) {
+        setChipFocus(null);
+        return;
+      }
+      // Up-arrow returns focus to the query field. Mirrors the down-arrow
+      // entry shortcut from the query-focused branch above.
+      if (key.upArrow) {
+        setChipFocus(null);
+        return;
+      }
+      // Tab and right-arrow cycle forward through the chips. The cycle
+      // wraps back to the query field after the last chip — same as
+      // Tab from the last chip. Shift+Tab and left-arrow go backward.
+      const chipOrder: ('web' | 'corpus' | 'output')[] = ['web', 'corpus', 'output'];
+      if (key.tab || key.rightArrow) {
+        if (key.shift) {
+          const idx = chipOrder.indexOf(s.chipFocus as 'web' | 'corpus' | 'output');
+          setChipFocus(idx === 0 ? null : chipOrder[idx - 1]);
+          return;
+        }
+        const idx = chipOrder.indexOf(s.chipFocus as 'web' | 'corpus' | 'output');
+        setChipFocus(idx === chipOrder.length - 1 ? null : chipOrder[idx + 1]);
+        return;
+      }
+      if (key.leftArrow) {
+        const idx = chipOrder.indexOf(s.chipFocus as 'web' | 'corpus' | 'output');
+        setChipFocus(idx <= 0 ? null : chipOrder[idx - 1]);
+        return;
+      }
+      if (s.chipFocus === 'web') {
+        if (input === ' ') {
+          dispatch({ type: 'toggle_participation', name: 'web' });
+          // Auto-advance focus so multi-toggle is quick.
+          setChipFocus('corpus');
+          return;
+        }
+        if (key.return) {
+          if (s.envLocked) return;
+          setDraft(s.tavilyKey);
+          setField('web');
+          setChipFocus(null);
+          return;
+        }
+      } else if (s.chipFocus === 'corpus') {
+        const corpusConfigured = !!s.corpusPath;
+        if (input === ' ') {
+          if (!corpusConfigured) {
+            // Unconfigured → Space opens config (no participation to flip).
+            setDraft('');
+            setField('scan');
+            setChipFocus(null);
+            return;
+          }
+          dispatch({ type: 'toggle_participation', name: 'corpus' });
+          setChipFocus('output');
+          return;
+        }
+        if (key.return) {
+          setDraft(s.corpusPath);
+          setField('scan');
+          setChipFocus(null);
+          return;
+        }
+      } else if (s.chipFocus === 'output') {
+        if (input === ' ' || key.return) {
+          setDraft(s.outputDir);
+          setField('output');
+          setChipFocus(null);
+          return;
+        }
+      }
+    },
+    { isActive: chipFocus !== null && field === 'query' },
   );
 
   const submitQuery = (q: string): void => {
@@ -310,7 +444,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
             value={query}
             onChange={setQuery}
             onSubmit={submitQuery}
-            focused
+            focused={chipFocus === null}
             placeholder={
               clarifying
                 ? 'Answer the questions above, or Esc to cancel…'
@@ -408,13 +542,23 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
       {/* Chips row — sources + the primary PLAN/START buttons.
           Reasoning mode (Deep/Flat) is chosen on the PlanReview screen
           (T toggles), not here — keeping the composer focused on
-          "what" and deferring "how" to plan-review. */}
+          "what" and deferring "how" to plan-review.
+
+          Source chips carry a tri-state participation glyph (●/○/─) and
+          are Tab-focusable for keyboard toggle/configure. Output is a
+          setting chip — no participation, no Space toggle (Enter still
+          opens its config when focused). */}
       <Box marginTop={0}>
         <SourceChip
           label="Web"
           origin={tavilyOrigin}
-          value={hasTavily ? 'set' : null}
+          value={hasTavily ? '(Tavily)' : '(Keyless)'}
+          alwaysActive
           disabled={envLocked}
+          participation={
+            state.participation['web'] !== false ? 'included' : 'excluded'
+          }
+          focused={chipFocus === 'web'}
         />
         <Text>  </Text>
         <SourceChip
@@ -427,15 +571,27 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
                 : state.config.sources.corpusPath
               : null
           }
+          participation={
+            !state.config?.sources.corpusPath
+              ? 'unconfigured'
+              : state.participation['corpus'] !== false
+                ? 'included'
+                : 'excluded'
+          }
+          focused={chipFocus === 'corpus'}
         />
-        <Text>  </Text>
+        <Text dimColor>  │  </Text>
         <SourceChip
-          label="Output"
+          label="Output dir"
           origin={outputOrigin}
-          value={state.config?.sources.outputDir ?? null}
+          // Effective destination — mirrors main.ts's `outputDir ?? cwd`
+          // fallback. Shows the user where runs actually land, not just
+          // what's configured.
+          value={shortPath(state.config?.sources.outputDir || process.cwd())}
+          focused={chipFocus === 'output'}
         />
         <Box flexGrow={1} />
-        {field === 'query' && !clarifying && !inSlash ? (
+        {field === 'query' && !clarifying && !inSlash && chipFocus === null ? (
           <SubmitButtons submitMode={submitMode} />
         ) : null}
       </Box>
@@ -445,6 +601,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
           hasSource={hasSource}
           inSlash={inSlash}
           clarifying={clarifying}
+          chipFocus={chipFocus}
         />
       </Box>
 
@@ -483,27 +640,61 @@ const SourceChip = memo(function SourceChip({
   origin,
   value,
   disabled = false,
+  alwaysActive = false,
+  participation,
+  focused = false,
 }: {
   label: string;
   origin: string;
   value: string | null;
   disabled?: boolean;
+  /** Chip is active regardless of config origin (e.g. Web has a keyless
+   *  fallback, so it is always a live source). */
+  alwaysActive?: boolean;
+  /** Tri-state per-query participation: `'included'` = participating in
+   *  the next query (filled glyph `●`); `'excluded'` = configured but
+   *  parked (hollow glyph `○`); `'unconfigured'` = no config (dash glyph
+   *  `─`). When omitted the chip is a settings-only indicator (e.g.
+   *  Output) and gets no participation glyph. */
+  participation?: 'included' | 'excluded' | 'unconfigured';
+  /** When true, the chip is the current Tab-focus target: Space toggles
+   *  participation, Enter opens the inline config editor. Rendered with
+   *  inverse video to make the focus visible. */
+  focused?: boolean;
 }): React.ReactElement {
-  const configured = origin !== 'unset';
-  const color = configured ? 'green' : 'gray';
+  const configured = alwaysActive || origin !== 'unset';
   const tag =
     origin === 'env' ? ' (env)'
       : origin === 'cli' ? ' (cli)'
       : '';
-  const suffix =
-    !configured ? '—'
-      : label === 'Scan' && value
-        ? value
-        : '✓';
+  const suffix = !configured ? '—' : (value ?? '✓');
+  const glyph =
+    participation === 'included' ? '● '
+      : participation === 'excluded' ? '○ '
+      : participation === 'unconfigured' ? '─ '
+      : '';
+  // Color encodes participation state on top of configured: included ⇒
+  // green (live), excluded ⇒ yellow (parked but configured), unconfigured
+  // / no participation ⇒ gray.
+  const color =
+    participation === 'excluded' ? 'yellow'
+      : !configured ? 'gray'
+      : 'green';
+  const body = `${glyph}${label} ${suffix}`;
+  if (focused) {
+    return (
+      <Text>
+        <Text backgroundColor="cyan" color="black" bold>
+          {` ${body} `}
+        </Text>
+        <Text dimColor>{tag}</Text>
+      </Text>
+    );
+  }
   return (
     <Text>
       <Text color={color} dimColor={disabled}>
-        {label} {suffix}
+        {body}
       </Text>
       <Text dimColor>{tag}</Text>
     </Text>
@@ -515,11 +706,13 @@ const HintRow = memo(function HintRow({
   hasSource,
   inSlash,
   clarifying,
+  chipFocus,
 }: {
   field: Field;
   hasSource: boolean;
   inSlash: boolean;
   clarifying: boolean;
+  chipFocus: 'web' | 'corpus' | 'output' | null;
 }): React.ReactElement {
   if (field === 'web' || field === 'scan' || field === 'output' || field === 'model' || field === 'reranker') {
     return <Text dimColor>⏎ save (empty to clear) · Ctrl+U clear · Esc cancel</Text>;
@@ -530,12 +723,17 @@ const HintRow = memo(function HintRow({
   if (inSlash) {
     return <Text dimColor>Tab complete · ⏎ run · Esc clear</Text>;
   }
+  if (chipFocus !== null) {
+    // Source chip focused — Space toggles participation; Enter opens
+    // the chip's inline config editor; Tab cycles to the next chip.
+    return <Text dimColor>Space toggle · ⏎ configure · Tab next · Esc back</Text>;
+  }
   if (!hasSource) {
     return <Text color="yellow">⚠ Add a source via /web or /scan</Text>;
   }
   // ⏎ submit is implied by the highlighted button. Just the
-  // PLAN/START toggle and slash-command pointer here.
-  return <Text dimColor>⇧Tab Plan/Start · / commands</Text>;
+  // PLAN/START toggle and slash/chip pointer here.
+  return <Text dimColor>⇧Tab Plan/Start · Tab focus chips · / commands</Text>;
 });
 
 const SubmitButtons = memo(function SubmitButtons({
