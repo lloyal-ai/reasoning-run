@@ -180,6 +180,7 @@ function createAgent(state: AppState, id: number, patch: Partial<AgentRuntime> =
     dependencyHint: null,
     currentThinkId: null,
     pendingToolCallId: null,
+    retry: null,
     contentBuffer: '',
     timeline: [],
     ...patch,
@@ -814,12 +815,21 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
       return { ...next, nextTimelineId: working.nextTimelineId + 1 };
     }
 
+    case 'agent:tool_retry': {
+      const agent = state.agents.get(ev.agentId);
+      if (!agent) return state;
+      return replaceAgent(state, ev.agentId, (a) => ({
+        ...a,
+        retry: { tool: ev.tool, retryAt: Date.now() + ev.retryAfterMs, attempt: ev.attempt },
+      }));
+    }
+
     case 'agent:tool_result': {
       const agent = state.agents.get(ev.agentId);
       if (!agent) return state;
 
       if (agent.taskIndex == null) {
-        return replaceAgent(state, ev.agentId, (a) => ({ ...a, phase: 'idle' }));
+        return replaceAgent(state, ev.agentId, (a) => ({ ...a, phase: 'idle', retry: null }));
       }
 
       const summary = summarizeResult(ev.tool, ev.result);
@@ -827,7 +837,7 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
       const hostsUnique = Array.from(new Set(summary.hosts));
       const next = replaceAgent(state, ev.agentId, (a) =>
         pushTimeline(
-          { ...a, phase: 'idle', pendingToolCallId: null },
+          { ...a, phase: 'idle', pendingToolCallId: null, retry: null },
           {
             kind: 'tool_result',
             id,

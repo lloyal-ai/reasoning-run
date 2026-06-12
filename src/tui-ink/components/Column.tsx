@@ -77,6 +77,7 @@ function stripFirstLineIfTitle(body: string): string {
 export const ToolCallItem = memo(function ToolCallItem({
   item,
   pending = false,
+  retry = null,
 }: {
   item: Extract<TimelineItem, { kind: 'tool_call' }>;
   /** True while the agent is awaiting this tool's result. Drives a
@@ -84,6 +85,10 @@ export const ToolCallItem = memo(function ToolCallItem({
    *  FrozenAgentPanel (which renders only completed agents) doesn't
    *  need to pass it. */
   pending?: boolean;
+  /** Park-and-retry state for THIS pending call — provider rate-limited,
+   *  pool re-executes after a delay. Renders a countdown so the wait is
+   *  visibly progress, not a hang. */
+  retry?: { retryAt: number; attempt: number } | null;
 }): React.ReactElement {
   // Inline spinner state — same pattern as PlanningSpinner.tsx. The
   // interval only runs while pending, then cleans up on tool_result.
@@ -97,15 +102,29 @@ export const ToolCallItem = memo(function ToolCallItem({
     return () => clearInterval(id);
   }, [pending]);
 
+  // Countdown computed at render — the pending spinner interval re-renders
+  // every tick, keeping the remaining-seconds display fresh for free.
+  const retrySecs = retry ? Math.max(0, Math.ceil((retry.retryAt - Date.now()) / 1000)) : null;
+
   return (
-    <Box flexShrink={0}>
-      {pending ? (
-        <Text color="cyan">{SPINNER_FRAMES[frame]} </Text>
-      ) : (
-        <Text dimColor>› </Text>
-      )}
-      <Text color="cyan">{item.tool}</Text>
-      {item.argsSummary ? <Text dimColor>  {item.argsSummary}</Text> : null}
+    <Box flexDirection="column" flexShrink={0}>
+      <Box>
+        {pending ? (
+          <Text color={retry ? 'yellow' : 'cyan'}>{SPINNER_FRAMES[frame]} </Text>
+        ) : (
+          <Text dimColor>› </Text>
+        )}
+        <Text color="cyan">{item.tool}</Text>
+        {item.argsSummary ? <Text dimColor>  {item.argsSummary}</Text> : null}
+      </Box>
+      {pending && retry ? (
+        <Box paddingLeft={2}>
+          <Text color="yellow">
+            rate-limited — retrying in ~{retrySecs}s
+            {retry.attempt > 1 ? ` (attempt ${retry.attempt})` : ''}
+          </Text>
+        </Box>
+      ) : null}
     </Box>
   );
 });
@@ -250,6 +269,7 @@ export const Column = memo(function Column({
                 key={item.id}
                 item={item}
                 pending={agent.pendingToolCallId === item.id}
+                retry={agent.pendingToolCallId === item.id ? agent.retry : null}
               />
             );
           }

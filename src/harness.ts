@@ -236,10 +236,30 @@ export interface PreflightResult {
  * spread `source.promptData()` into ctx.
  */
 function appPreamble(app: App, ctx: AgentRenderCtx): string {
-  const extra =
-    (app.source as { promptData?: () => Record<string, unknown> }).promptData?.() ??
-    {};
-  return renderAgentPreamble(app, { ...ctx, ...extra });
+  return renderAgentPreamble(app, ctx as AgentRenderCtx & Record<string, unknown>);
+}
+
+/**
+ * Spine = framework catalog + harness-trusted app reference data.
+ *
+ * `renderSpine` stays prose-free by design (cross-app injection defense:
+ * the shared prefix is read by every agent in the pool). Appending app
+ * `promptData` is the HARNESS's trust call — reasoning.run ships
+ * first-party apps only. Rendered once and prefix-shared by every fork,
+ * instead of duplicated into each spawn's suffix (six 4.8k-token
+ * TOC-bearing suffixes overran a 32k context: trace-2026-06-11T06-21).
+ */
+function renderSpineWithReferenceData(apps: readonly App[]): string {
+  const blocks: string[] = [];
+  for (const app of apps) {
+    const toc = app.source.promptData()["toc"];
+    if (typeof toc === "string" && toc.trim()) {
+      blocks.push(
+        `\n\n# ${app.manifest.protocol.name} — available files\n${toc}`,
+      );
+    }
+  }
+  return renderSpine({ apps }) + blocks.join("");
 }
 
 function today(): string {
@@ -356,7 +376,7 @@ export function* runPreflight(
   const timer = startTimer();
 
   const reconTools = [...apps.flatMap((a) => [...a.tools]), reportTool];
-  const spinePrompt = renderSpine({ apps });
+  const spinePrompt = renderSpineWithReferenceData(apps);
   const currentDate = today();
 
   const { coverage, tokens, toolCalls } = yield* withSpine<{
@@ -714,7 +734,7 @@ export function* runResearchPlan(
   // app a given agent is assigned.
   const primaryScorer = primaryApp.source.createScorer(query);
   const researchTools = [...apps.flatMap((a) => [...a.tools]), reportTool];
-  const spinePrompt = renderSpine({ apps });
+  const spinePrompt = renderSpineWithReferenceData(apps);
 
   let synthTimeMs = 0;
   let researchTimeMs = 0;
@@ -835,6 +855,20 @@ export function* runResearchPlan(
         };
       }
 
+      // All-empty gate: every agent was cut before producing findings
+      // (capacity failure, mass tool outage). Synthesizing from nothing
+      // yields a confident hallucination sourced from model priors —
+      // 16k chars of it in trace-2026-06-11T06-21. Say so honestly instead.
+      if (research.agents.every((a) => !a.result?.trim())) {
+        return {
+          answer:
+            "Research produced no findings — every agent was cut before completing its task (see trace for drop reasons). No synthesis was attempted.",
+          totalTokens: research.totalTokens,
+          totalToolCalls: research.totalToolCalls,
+          synthTokens: 0,
+        };
+      }
+
       yield* send({ type: "synthesize:start" });
       const synthT = startTimer();
 
@@ -845,7 +879,15 @@ export function* runResearchPlan(
           ? research.agents
               .map((a, i) => {
                 const desc = tasks[i]?.description ?? `task ${i + 1}`;
-                const body = a.result?.trim() || "(no findings)";
+                // Consumer-side guard: a dangling <tool_call> fragment in a
+                // finding is an in-context demonstration that primes the
+                // (tool-less) synth agent to emit tool calls. The framework
+                // sanitizes at result capture; this catches anything that
+                // slips through a future capture path.
+                const body =
+                  a.result
+                    ?.replace(/<tool_call>(?:(?!<\/tool_call>)[\s\S])*$/, "")
+                    .trim() || "(no findings)";
                 return `### Agent ${i + 1}: ${desc}\n\n${body}`;
               })
               .join("\n\n")

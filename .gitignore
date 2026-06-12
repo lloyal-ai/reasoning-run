@@ -4,3 +4,4 @@ harness.json
 trace-*.jsonl
 *.tgz
 .DS_Store
+scripts/

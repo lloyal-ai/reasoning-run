@@ -30,8 +30,11 @@ import {
   initAgents,
   JsonlTraceWriter,
   RerankerCtx,
+  extractSpineSeed,
+  reconstructBranch,
+  type BranchCheckpoint,
 } from "@lloyal-labs/lloyal-agents";
-import type { App } from "@lloyal-labs/lloyal-agents";
+import type { App, TraceEvent } from "@lloyal-labs/lloyal-agents";
 import {
   c,
   log,
@@ -87,6 +90,7 @@ const { values: flags, positionals } = parseArgs({
     "reasoning-mode": { type: "string" },
     "n-ctx": { type: "string" },
     "output-dir": { type: "string" },
+    "replay-trace": { type: "string" },
     jsonl: { type: "boolean", default: false },
     verbose: { type: "boolean", default: false },
   },
@@ -106,11 +110,83 @@ if (
 }
 
 const cliModelPath = positionals[0] || undefined;
-const jsonlMode = flags.jsonl;
 const verbose = flags.verbose;
 const cliOutputDir = flags["output-dir"];
-const initialQuery = flags.query;
 const configPath = flags.config ?? DEFAULT_CONFIG_PATH;
+const replayTracePath = flags["replay-trace"];
+
+// ── Replay mode (regression-test + A/B harness) ──────────────────
+//
+// When --replay-trace is set, parse the trace file UP-FRONT so we fail loudly
+// on a missing or malformed file before initializing the model. Extract the
+// pre-research spine seed checkpoint + the original query — those drive the
+// session trunk + auto-submit later. Force jsonlMode (no TUI; one-shot run).
+//
+// Determinism caveat: this MVP doesn't capture/replay sampler PRNG seeds, so
+// the agent's first-token decisions can diverge from the original run. The
+// reconstructed KV state is exact; what's after isn't. For rerank-quality
+// regression, that's usually OK — the early tool calls (planner → first
+// search) tend to land on the same prompts. Hardening to true determinism
+// (sampler-seed capture in trace events + replay-side reseeding) is future
+// work.
+let replayCheckpoint: BranchCheckpoint | null = null;
+let replayQuery: string | undefined;
+if (replayTracePath) {
+  if (!fs.existsSync(replayTracePath)) {
+    process.stderr.write(`--replay-trace: file not found: ${replayTracePath}\n`);
+    process.exit(2);
+  }
+  const replayEvents: TraceEvent[] = [];
+  for (const line of fs.readFileSync(replayTracePath, "utf-8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      replayEvents.push(JSON.parse(trimmed) as TraceEvent);
+    } catch (err) {
+      process.stderr.write(
+        `--replay-trace: malformed JSONL line skipped: ${(err as Error).message}\n`,
+      );
+    }
+  }
+  try {
+    replayCheckpoint = extractSpineSeed(replayEvents);
+  } catch (err) {
+    process.stderr.write(
+      `--replay-trace: ${(err as Error).message}\n` +
+        `(trace must contain a prompt:format event with role='spine' — captured by SDK ≥ replay-primitives release)\n`,
+    );
+    process.exit(2);
+  }
+  // The planner emits a prompt:format event with role='agentSuffix' whose
+  // taskContent embeds the user's original query as `The query: "<text>"`.
+  // (Convention from reasoning.run's planner.eta, not a framework one.)
+  const plannerEvt = replayEvents.find(
+    (e): e is Extract<TraceEvent, { type: "prompt:format" }> =>
+      e.type === "prompt:format" &&
+      "role" in e &&
+      e.role === "agentSuffix" &&
+      typeof (e as { taskContent?: unknown }).taskContent === "string" &&
+      ((e as { taskContent: string }).taskContent.startsWith("The query:")),
+  );
+  if (plannerEvt) {
+    const m = /The query:\s*"([^"]+)"/.exec(
+      (plannerEvt as { taskContent: string }).taskContent,
+    );
+    if (m) replayQuery = m[1];
+  }
+  if (!replayQuery) {
+    process.stderr.write(
+      `--replay-trace: could not extract original query from trace (no planner prompt:format event matched 'The query: "..."').\n` +
+        `Pass --query to override.\n`,
+    );
+    if (!flags.query) process.exit(2);
+  }
+}
+
+// In replay mode, force jsonl (no TUI). The flag's still respected for
+// non-replay runs.
+const jsonlMode = flags.jsonl || replayTracePath != null;
+const initialQuery = flags.query ?? replayQuery;
 
 const nCtxFlag = flags["n-ctx"];
 if (nCtxFlag !== undefined && !/^\d+$/.test(nCtxFlag)) {
@@ -177,11 +253,8 @@ function buildPlannerContext(apps: readonly App[]): string {
   for (const app of apps) {
     const protocol = app.manifest.protocol;
     lines.push("", `### ${protocol.name}`, protocol.useWhen);
-    // `promptData` is corpus-specific — duck-type to surface the corpus TOC.
-    const corpus = app.source as { promptData?: () => { toc?: string } };
-    const toc =
-      typeof corpus.promptData === "function" ? corpus.promptData().toc : undefined;
-    if (toc) {
+    const toc = app.source.promptData()["toc"];
+    if (typeof toc === "string" && toc) {
       lines.push("Files and top-level topics available in this source:", toc);
     }
   }
@@ -478,7 +551,11 @@ main(function* () {
           // createReranker is an Effection resource() — yield it directly; it
           // owns its model context and disposes on this scope's exit.
           reranker = yield* createReranker(rerankModelPathNow, {
-            nSeqMax: 8,
+            // 10, not 8: the rerank architecture spends 2 leases on
+            // trunk + queryBranch; 10 keeps 8 effective scoring leaves
+            // (rig's default — this override previously pinned the old 8
+            // and silently shrank batches to 6 leaves).
+            nSeqMax: 10,
             nCtx: 16384,
           });
         } catch (err) {
@@ -543,6 +620,18 @@ main(function* () {
         traceWriter,
       });
 
+      // Replay mode: rebuild the spine from the captured checkpoint and
+      // install it as the session trunk BEFORE the apps register their
+      // reranker / corpus / event listeners. From this point on the rest of
+      // the boot path is unchanged — runQuery forks from session.trunk like
+      // any normal warm-session query, so the reconstructed KV is what the
+      // research pool inherits. The branch's lifetime is tied to this
+      // iteration's scope via reconstructBranch's internal `ensure()`.
+      if (replayCheckpoint) {
+        const replaySpine = yield* reconstructBranch(replayCheckpoint);
+        session.trunk = replaySpine;
+      }
+
       // Spawned children of this iteration's scope auto-halt on return —
       // no manual cleanup needed.
       yield* spawn(function* () {
@@ -586,9 +675,8 @@ main(function* () {
         uiChannel.send({ type: "weights:label", label: "Indexing corpus…" });
         try {
           const corpusApp = yield* registry.enable(createCorpusApp);
-          const pd = (
-            corpusApp.source as { promptData?: () => { toc?: string } }
-          ).promptData?.();
+          const pdToc = corpusApp.source.promptData()["toc"];
+          const pd = { toc: typeof pdToc === "string" ? pdToc : undefined };
           uiChannel.send({
             type: "corpus:indexed",
             corpusPath: liveConfig.sources.corpusPath,

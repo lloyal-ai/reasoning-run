@@ -89,6 +89,12 @@ export interface AgentRuntime {
   currentThinkId: number | null;
   /** Id of the most recent tool_call, paired with its tool_result when one lands. */
   pendingToolCallId: number | null;
+  /** Live park-and-retry state for the pending tool call (rate-limited
+   *  provider; pool re-executes after the delay). Set on agent:tool_retry,
+   *  cleared when the eventual tool_result lands. Renders as
+   *  "rate-limited — retrying in ~Ns" so a waiting agent never reads as
+   *  hung. */
+  retry: { tool: string; retryAt: number; attempt: number } | null;
   /** Live post-</think> token buffer. Tokens stream into this between
    *  closing a think block and the next agent:tool_call / agent:report
    *  (the model is writing tool-call JSON — report body lives inside).
