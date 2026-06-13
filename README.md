@@ -1,6 +1,6 @@
 # reasoning.run
 
-A private reasoner for your terminal. Direct conversation or grounded multi-agent research, GPU-native and fully local. No API keys, no inference servers.
+A private reasoner for your terminal. Direct conversation or grounded multi-agent research, GPU-native and fully local. No API keys, no inference servers. Open source (MIT).
 
 ```
 npx reasoning.run
@@ -14,15 +14,15 @@ Then type a research question.
   <em>Qwen3.5 4B + Qwen3 0.6B reranker · 5 parallel agents · shared 32K context · fully offline on M2 MacBook Pro 16 GB</em>
 </p>
 
-> Built with **[HDK](https://hdk.lloyal.ai/)** — Lloyal's Harness Development Kit. The agentic envelope for local-first apps: models, tools, retrieval, and multi-agent orchestration in one import, no API keys, no inference servers.
+> Built with **[HDK](https://hdk.lloyal.ai/)** — Lloyal's Harness Development Kit. An in-app intelligence runtime for local-first apps: models, agents, tools, and retrieval in one import — no model server, no API keys.
 
 **Empirically:** 5 research agents running concurrently in a shared 32K-token context window, Qwen3.5-4B as the LLM, on a MacBook Pro M2 (16 GB unified memory). No GPU server, no API keys, no inference fees. Every token is decoded on the device that asked the question.
 
 ## What you get
 
 - **Plan, edit, run.** A small planner decomposes your question into research tasks. You see the plan in a TUI editor — navigate with ↑↓, edit a task with ⏎, add/delete/reorder with `A`/`D`/`⇧↑↓`. Press START on a plan you actually agree with. Nothing runs until you say so.
-- **5 agents in one context window.** HDK's [Continuous Context](https://hdk.lloyal.ai/reference/continuous-context-spine) lets agents share GPU KV state, not strings — five research agents fit inside a single 32K-token budget on a 16 GB MacBook. Decoded in-process, no API calls, no inference server.
-- **Retrieval inside the loop.** Each agent searches, fetches, and reranks chunks *during* generation via HDK's [RIG](https://hdk.lloyal.ai/learn/sources) primitives — Tavily for web, local markdown for corpus. Adaptive tool use, multi-hop reasoning.
+- **5 agents in one context window.** HDK's [Continuous Context](https://docs.lloyal.ai/under-the-hood/continuous-context-spine) lets agents share GPU KV state, not strings — five research agents fit inside a single 32K-token budget on a 16 GB MacBook. Decoded in-process, no API calls, no inference server.
+- **Retrieval inside the loop.** Each agent searches, fetches, and reranks chunks *during* generation via HDK's [RIG](https://docs.lloyal.ai/build-an-app/sources-and-retrieval) primitives — keyless web search by default (Tavily optional), local markdown for corpus. Adaptive tool use, multi-hop reasoning.
 - **Warm follow-ups.** Subsequent queries in the same session reuse the trunk's KV. The planner runs instantly; agents fork from a context that already remembers the prior turn.
 - **Hot model swap.** `/model <path>` rebuilds the harness against a new `.gguf` mid-session. Test against different model sizes and quants in seconds, same process.
 - **Bundled output per query.** `report.md` (synth answer) + `annexure-N.md` (each research agent's full report) on disk. Grep, diff, share.
@@ -36,7 +36,7 @@ State lives in `./harness.json` (auto-created, auto-gitignored on first save):
 ```jsonc
 {
   "sources": {
-    "tavilyKey": "tvly-...",           // optional — web search via Tavily
+    "tavilyKey": "tvly-...",           // optional — web search is keyless by default; set this to use Tavily instead
     "corpusPath": "/path/to/docs",     // optional — local markdown corpus
     "outputDir": "./reasoning-runs"    // optional — defaults to cwd
   },
@@ -57,7 +57,7 @@ Type `/` in the composer to open the command palette. Tab autocompletes; Enter r
 
 | Command | Effect |
 |---|---|
-| `/web <key>` | Set Tavily API key. Empty value clears. |
+| `/web <key>` | Set the optional Tavily key (web search works keyless without it). Empty clears. |
 | `/scan <path>` | Set local file/glob source. Empty value clears. |
 | `/output <dir>` | Set the run-artifact output directory. Empty value resets to cwd. |
 | `/model <path>` | Use a local LLM `.gguf` instead of the catalog default. |
@@ -132,16 +132,16 @@ reasoning.run is a working harness on [Lloyal's **Harness Development Kit**](htt
 
 - **`useAgent`** — single agents with tools and a terminal report tool. Powers the planner, the bridge, and synth.
 - **`agentPool` + `parallel`/`chain`** — multi-agent orchestration. Drives the research phase: parallel fan-out for `Flat` mode, chained tasks for `Deep` mode.
-- **Playbooks convention** — planner, web_research, corpus_research, and synth agents share a single tool palette amortized at the harness's shared root. Tool schemas decoded once; each agent reads its role from a short suffix. See [Playbooks](https://hdk.lloyal.ai/reference/playbooks).
-- **Continuous Context Spine** — agents share GPU KV state instead of re-tokenizing strings, so 5 concurrent agents fit inside one 32K-token context budget on consumer hardware. Also why subsequent queries in the same session are warm and instant — the prior turn's tokens are still in the trunk's KV.
-- **Retrieval-Interleaved Generation (RIG)** — `WebSource` (Tavily) and `CorpusSource` (local markdown) plug in via the `Source` contract, with reranker-scored chunks fed inline during generation.
-- **Bring your own data via the `Source` contract.** Tavily and local markdown are bundled; the contract is small enough to wrap a vector DB, REST API, JIRA, or any other domain knowledge surface. See [Custom Sources](https://hdk.lloyal.ai/guides/custom-source).
+- **AgentApps** — capabilities arrive as AgentApps, registered with `createAppRegistry`. reasoning.run enables two: a **web** AgentApp (always on, keyless search by default — Tavily optional) and a **corpus** AgentApp (your local markdown). Each bundles a Source, its Tools, and a prompted skill; the catalog is decoded once into the shared spine, and every research agent reads its role from a short suffix. See [What is an AgentApp](https://docs.lloyal.ai/build-an-app/what-is-an-app).
+- **Continuous Context** — agents share GPU KV state instead of re-tokenizing strings, so 5 concurrent agents fit inside one 32K-token context budget on consumer hardware. Also why subsequent queries in the same session are warm and instant — the prior turn's tokens are still in the trunk's KV. ([physics](https://docs.lloyal.ai/under-the-hood/continuous-context-spine))
+- **Retrieval-Interleaved Generation (RIG)** — the web and corpus AgentApps return reranker-scored chunks inline *during* generation, so agents search, fetch, and reason in one loop. See [Sources & retrieval](https://docs.lloyal.ai/build-an-app/sources-and-retrieval).
+- **Bring your own data — build an AgentApp.** Wrap a vector DB, REST API, JIRA, or any domain surface as an AgentApp and `registry.enable` it; the harness code doesn't change. See [Build an AgentApp](https://docs.lloyal.ai/build-an-app/what-is-an-app).
 - **`@lloyal-labs/lloyal.node`** — llama.cpp Node binding for in-process inference.
 
-If you like what reasoning.run does and want to build something similar — a local research tool, a domain-specific agent, an in-app assistant — read the [HDK docs](https://hdk.lloyal.ai/) and start with `useAgent`.
+reasoning.run is open source (MIT) — the whole harness, boot to TUI to research loop, is here to read and fork. If you want to build something similar — a local research tool, a domain-specific agent, an in-app assistant — read the [HDK docs](https://docs.lloyal.ai/) and start with `useAgent`.
 
 UI is [Ink](https://github.com/vadimdemedes/ink) (React for terminals).
 
 ## License
 
-Proprietary. © 2026 Lloyal AI. See `LICENSE` for terms.
+MIT © 2026 Lloyal AI. See `LICENSE`. reasoning.run is open source — fork it, study it, ship your own. Its dependencies keep their own licenses: the HDK runtime (`@lloyal-labs/*`) is Fair Source (FSL-1.1-Apache-2.0), the `harness.dev` CLI is Apache-2.0.
