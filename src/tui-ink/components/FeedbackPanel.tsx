@@ -47,8 +47,12 @@ export function FeedbackPanel({ state, initialMessage, onClose }: FeedbackPanelP
   };
 
   const compose = (withErrors: boolean) => {
+    // One source of truth for the message so the body and the URL title agree
+    // (the message is guaranteed non-empty by the step-1 gate; the fallback is
+    // defensive only).
+    const msg = message.trim() || 'feedback';
     const { body, truncated } = buildFeedbackBody({
-      message: message.trim() || '(no message)',
+      message: msg,
       env: state.env,
       config: state.config,
       mode: state.mode,
@@ -56,7 +60,7 @@ export function FeedbackPanel({ state, initialMessage, onClose }: FeedbackPanelP
       includeErrors: withErrors,
       scrubCtx,
     });
-    const url = buildIssueUrl({ title: feedbackTitle(message.trim() || 'feedback'), body });
+    const url = buildIssueUrl({ title: feedbackTitle(msg), body });
     return { url, truncated };
   };
 

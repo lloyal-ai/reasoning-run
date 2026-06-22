@@ -926,5 +926,15 @@ check('preflight:start reset preserves errors + env', () => {
   assert.deepEqual(s.env, env);
 });
 
+check('ui:error stamps the query active at capture time', () => {
+  const s = drive([
+    { type: 'query', query: 'matter-alpha', warm: false },
+    { type: 'ui:error', message: 'research failed on matter-alpha' },
+    { type: 'query', query: 'matter-beta', warm: false },
+  ]);
+  assert.equal(s.errors.length, 1);
+  assert.equal(s.errors[0].query, 'matter-alpha'); // stamped at capture, not the later query
+});
+
 process.stdout.write('---\n');
 process.stdout.write(process.exitCode ? 'FAILED\n' : 'all passed\n');

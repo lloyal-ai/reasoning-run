@@ -181,6 +181,10 @@ export interface ErrorRecord {
   /** Present for boot errors (model vs reranker). */
   kind?: 'llm' | 'reranker';
   at: number;
+  /** The query active when this error was captured. Stamped so /feedback can
+   *  scrub each error against its OWN query (the buffer outlives the query
+   *  that produced it). */
+  query?: string;
 }
 
 /** Non-sensitive environment snapshot for feedback issues. Assembled in

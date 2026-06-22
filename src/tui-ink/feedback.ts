@@ -29,23 +29,53 @@ function basename(p: string): string {
   return parts.length ? parts[parts.length - 1] : p;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Redact common secret shapes so a key echoed in an error never reaches a
+ *  public issue. Best-effort, high-precision patterns only (provider key
+ *  prefixes, JWTs, KEY=VALUE env fragments, bearer/authorization headers).
+ *  Over-redaction is the safe direction for a public destination. */
+function redactSecrets(s: string): string {
+  return s
+    // JWTs (header.payload.signature)
+    .replace(/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, '[redacted-token]')
+    // Provider / API key shapes with known prefixes
+    .replace(/\b(tvly|sk|pk|rk|ghp|gho|ghu|ghs|github_pat|xox[abprs]|AIza|AKIA|ASIA|hf)[-_][A-Za-z0-9_-]{8,}/g, '[redacted-key]')
+    // KEY=VALUE env-style where the key name looks secret (case-insensitive)
+    .replace(/\b([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS|PWD)[A-Za-z0-9_]*)\s*=\s*\S+/gi, '$1=[redacted]')
+    // Bearer / Authorization headers
+    .replace(/\b(Bearer|Authorization)\b\s*:?\s*\S+/gi, '$1 [redacted]');
+}
+
 export function scrubError(message: string, ctx: ScrubCtx): string {
   let s = message;
-  // 1. Redact the session query verbatim, if present.
+  // 1. Redact known secret shapes first (keys, JWTs, KEY=VALUE, bearer).
+  s = redactSecrets(s);
+  // 2. Redact the session/error query verbatim, if present.
   if (ctx.query && ctx.query.trim()) {
     s = s.split(ctx.query).join('[query]');
   }
-  // 2. Strip URL query strings (may carry keys / search terms).
-  s = s.replace(/(https?:\/\/[^\s?]+)\?[^\s]*/g, '$1');
-  // 3. Configured paths → basename.
+  // 3. Collapse URLs to scheme://host — drops the path + query (ids / keys /
+  //    search terms) and stops the path-basename step below from mangling URLs.
+  s = s.replace(/\bhttps?:\/\/[^\s/]+(?:\/[^\s]*)?/g, (m) => {
+    const origin = m.match(/^https?:\/\/[^\s/]+/);
+    return origin ? origin[0] : m;
+  });
+  // 4. Configured paths → basename.
   for (const p of ctx.paths ?? []) {
     if (p && s.includes(p)) s = s.split(p).join(basename(p));
   }
-  // 4. Home dir → ~.
-  if (ctx.homeDir && ctx.homeDir.trim()) s = s.split(ctx.homeDir).join('~');
-  // 5. Remaining absolute paths (POSIX + Windows + UNC) → basename.
-  s = s.replace(/(?:[A-Za-z]:\\|\\\\|\/)[^\s:?"<>|]+/g, (m) => basename(m));
-  // 6. Length bound.
+  // 5. Home dir → ~ (path-boundary only, so a /home/jo home dir doesn't
+  //    mangle an unrelated sibling like /home/joanna).
+  if (ctx.homeDir && ctx.homeDir.trim()) {
+    s = s.replace(new RegExp(escapeRegExp(ctx.homeDir) + '(?=/|\\\\|\\s|$)', 'g'), '~');
+  }
+  // 6. Remaining filesystem paths (POSIX + Windows + UNC) → basename. The
+  //    lookbehind keeps it from biting into a `scheme://` remnant.
+  s = s.replace(/(?<![:/\\])(?:[A-Za-z]:\\|\\\\|\/)[^\s:?"<>|]+/g, (m) => basename(m));
+  // 7. Length bound.
   if (s.length > MAX_ERROR_LEN) s = s.slice(0, MAX_ERROR_LEN) + '…';
   return s.trim();
 }
@@ -113,9 +143,13 @@ export function buildFeedbackBody(input: BuildBodyInput): { body: string; trunca
   if (truncated) msg = msg.replace(/\s*$/, '') + '\n…(truncated)';
   let body = header(msg);
 
-  // 2. Add scrubbed errors greedily while they fit.
+  // 2. Add scrubbed errors greedily while they fit. Each error is scrubbed
+  //    against its OWN captured query (falling back to the current one), so an
+  //    older query embedded in a persisted error doesn't leak.
   if (includeErrors && errors.length) {
-    const scrubbed = errors.map((e) => scrubError(e.message, scrubCtx)).filter(Boolean);
+    const scrubbed = errors
+      .map((e) => scrubError(e.message, { ...scrubCtx, query: e.query ?? scrubCtx.query }))
+      .filter(Boolean);
     const kept: string[] = [];
     for (let i = 0; i < scrubbed.length; i++) {
       const candidate = kept.concat(scrubbed[i]);
@@ -128,11 +162,19 @@ export function buildFeedbackBody(input: BuildBodyInput): { body: string; trunca
       kept.push(scrubbed[i]);
     }
     if (kept.length) {
-      const omitted = scrubbed.length - kept.length;
-      const note = omitted > 0 ? `\n_(+${omitted} more errors truncated)_\n` : '';
-      body = header(msg) +
-        `\n## Errors (${kept.length})\n` +
-        kept.map((m, j) => `${j + 1}. ${m}`).join('\n') + '\n' + note;
+      const render = (arr: string[], omitted: number): string =>
+        header(msg) +
+        `\n## Errors (${arr.length})\n` +
+        arr.map((m, j) => `${j + 1}. ${m}`).join('\n') + '\n' +
+        (omitted > 0 ? `\n_(+${omitted} more errors truncated)_\n` : '');
+      body = render(kept, scrubbed.length - kept.length);
+      // The "+N more" note itself adds bytes — trim until the ENCODED url fits,
+      // so the cap holds even with the note appended.
+      while (kept.length && encodedLen(title, body) > MAX_ENCODED_URL) {
+        kept.pop();
+        truncated = true;
+        body = render(kept, scrubbed.length - kept.length);
+      }
     }
   }
 

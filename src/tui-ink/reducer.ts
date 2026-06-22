@@ -578,7 +578,7 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         uiPhase: 'composer',
         toast: { id: toastId, message: ev.message, tone: 'error' },
         nextToastId: toastId,
-        errors: appendError(state.errors, { message: ev.message, at: Date.now() }),
+        errors: appendError(state.errors, { message: ev.message, at: Date.now(), query: state.query || undefined }),
       };
     }
 
@@ -656,7 +656,7 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         ...state,
         uiPhase: 'boot_error',
         bootError: { kind: ev.kind, message: ev.message },
-        errors: appendError(state.errors, { message: ev.message, kind: ev.kind, at: Date.now() }),
+        errors: appendError(state.errors, { message: ev.message, kind: ev.kind, at: Date.now(), query: state.query || undefined }),
       };
 
     // ── Agent events ───────────────────────────────────────────

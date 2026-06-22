@@ -1032,8 +1032,16 @@ main(function* () {
               if (process.platform === "darwin") {
                 child = cpSpawn("open", [url], { stdio: "ignore", detached: true });
               } else if (process.platform === "win32") {
-                // `start` is a cmd.exe builtin — cannot be spawned directly.
-                child = cpSpawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true });
+                // Not `cmd /c start "" <url>`: cmd.exe re-parses the URL and an
+                // unquoted `&` (every issue URL has them between query params) is
+                // read as a command separator. PowerShell Start-Process with a
+                // single-quoted URL keeps `&` literal. The URL is percent-encoded
+                // so it can never contain a literal single quote.
+                child = cpSpawn(
+                  "powershell.exe",
+                  ["-NoProfile", "-NonInteractive", "-Command", `Start-Process '${url}'`],
+                  { stdio: "ignore", detached: true },
+                );
               } else {
                 child = cpSpawn("xdg-open", [url], { stdio: "ignore", detached: true });
               }
