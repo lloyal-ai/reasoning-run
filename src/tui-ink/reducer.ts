@@ -15,6 +15,12 @@ import type { WorkflowEvent } from './events';
 import type { Config } from './config';
 import { shortPath } from './path-utils';
 
+const MAX_ERRORS = 20;
+function appendError(buf: AppState['errors'], rec: AppState['errors'][number]): AppState['errors'] {
+  const next = [...buf, rec];
+  return next.length > MAX_ERRORS ? next.slice(next.length - MAX_ERRORS) : next;
+}
+
 /** Seed/refresh `participation` from current config. reasoning.run today
  *  hardcodes two source apps: `web` (always enabled with a keyless
  *  fallback) and `corpus` (enabled iff a path is set). Configuring (or
@@ -256,6 +262,8 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         toast: state.toast,
         scrollback: state.scrollback,
         participation: state.participation,
+        errors: state.errors,
+        env: state.env,
         query: ev.query,
         warm: ev.warm,
         phase: 'plan',
@@ -492,6 +500,8 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         scrollback: state.scrollback,
         corpusStatus: state.corpusStatus,
         participation: state.participation,
+        errors: state.errors,
+        env: state.env,
         query: ev.query,
         uiPhase: 'discovering',
         phase: 'recon',
@@ -568,8 +578,12 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         uiPhase: 'composer',
         toast: { id: toastId, message: ev.message, tone: 'error' },
         nextToastId: toastId,
+        errors: appendError(state.errors, { message: ev.message, at: Date.now() }),
       };
     }
+
+    case 'ui:env':
+      return { ...state, env: ev.env };
 
     // ── Boot phases ────────────────────────────────────────────
 
@@ -642,6 +656,7 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         ...state,
         uiPhase: 'boot_error',
         bootError: { kind: ev.kind, message: ev.message },
+        errors: appendError(state.errors, { message: ev.message, kind: ev.kind, at: Date.now() }),
       };
 
     // ── Agent events ───────────────────────────────────────────

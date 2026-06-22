@@ -876,5 +876,55 @@ check('discovering → planning hand-off: query event clears recon agents', () =
   assert.equal(s.agents.size, 0);
 });
 
+check('ui:error appends to errors buffer', () => {
+  const s = drive([{ type: 'ui:error', message: 'boom' }]);
+  assert.equal(s.errors.length, 1);
+  assert.equal(s.errors[0].message, 'boom');
+});
+
+check('boot:error appends with kind', () => {
+  const s = drive([{ type: 'boot:error', kind: 'llm', message: 'load failed' }]);
+  assert.equal(s.errors.length, 1);
+  assert.equal(s.errors[0].kind, 'llm');
+});
+
+check('errors buffer is FIFO-capped at 20', () => {
+  const evs: WorkflowEvent[] = [];
+  for (let i = 0; i < 25; i++) evs.push({ type: 'ui:error', message: `e${i}` });
+  const s = drive(evs);
+  assert.equal(s.errors.length, 20);
+  assert.equal(s.errors[0].message, 'e5');   // oldest 5 dropped
+  assert.equal(s.errors[19].message, 'e24');
+});
+
+check('ui:env seeds env meta', () => {
+  const env = { version: '0.3.1', platform: 'darwin', arch: 'arm64', cpuModel: 'Apple M2', nodeVersion: 'v22.0.0', gpu: 'metal' };
+  const s = drive([{ type: 'ui:env', env }]);
+  assert.deepEqual(s.env, env);
+});
+
+check('query reset preserves errors + env', () => {
+  const env = { version: '0.3.1', platform: 'linux', arch: 'x64', cpuModel: 'Ryzen 5 3600', nodeVersion: 'v22', gpu: 'cuda' };
+  const s = drive([
+    { type: 'ui:env', env },
+    { type: 'ui:error', message: 'pre-query error' },
+    { type: 'query', query: 'next', warm: false },
+  ]);
+  assert.equal(s.errors.length, 1);
+  assert.equal(s.errors[0].message, 'pre-query error');
+  assert.deepEqual(s.env, env);
+});
+
+check('preflight:start reset preserves errors + env', () => {
+  const env = { version: '0.3.1', platform: 'linux', arch: 'x64', cpuModel: 'Ryzen', nodeVersion: 'v22', gpu: 'cuda' };
+  const s = drive([
+    { type: 'ui:env', env },
+    { type: 'ui:error', message: 'pre-preflight error' },
+    { type: 'preflight:start', query: 'q', appCount: 2 },
+  ]);
+  assert.equal(s.errors.length, 1);
+  assert.deepEqual(s.env, env);
+});
+
 process.stdout.write('---\n');
 process.stdout.write(process.exitCode ? 'FAILED\n' : 'all passed\n');

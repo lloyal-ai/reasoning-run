@@ -10,6 +10,7 @@
 import type { AgentEvent } from '@lloyal-labs/lloyal-agents';
 import type { PlanIntent, ResearchTask } from '@lloyal-labs/rig';
 import type { OpTiming } from './state';
+import type { EnvMeta } from './state';
 import type { Config, ConfigOrigin } from './config';
 
 export type StepEvent =
@@ -80,6 +81,7 @@ export type StepEvent =
   | { type: 'ui:composer'; prefill?: string }
   | { type: 'ui:plan_review' }
   | { type: 'ui:error'; message: string }
+  | { type: 'ui:env'; env: EnvMeta }
   // ── Boot-phase events: download progress + weight-loading spinner ──
   /** Pre-populates `state.downloads` with the full set of files about to
    *  be fetched. Sent ONCE before any individual download:start so the
