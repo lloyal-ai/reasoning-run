@@ -101,6 +101,20 @@ check('buildIssueUrl encodes and stays under GitHub cap', () => {
   assert.ok(!url.includes(' '), 'no raw spaces');
 });
 
+check('buildIssueUrl strict-encodes shell-dangerous chars (no raw quote/paren left in URL)', () => {
+  // encodeURIComponent leaves ' ( ) * ! ~ raw; these must be percent-encoded so
+  // the URL is safe if ever interpolated into a shell/PowerShell command.
+  const url = buildIssueUrl({
+    title: "t'(*!~)",
+    body: "Start-Process 'x'.foo() ! ~ malicious",
+  });
+  const afterBase = url.slice('https://github.com/lloyal-ai/reasoning-run/issues/new'.length);
+  for (const c of ["'", '(', ')', '*', '!', '~']) {
+    assert.ok(!afterBase.includes(c), `raw ${c} must not appear in URL: ${url}`);
+  }
+  assert.ok(url.includes('%27'), 'single quote encoded as %27');
+});
+
 // ── Hardening (post-review): secret scrubbing, URL handling, cap, per-error query ──
 
 check('scrubError redacts provider API keys', () => {

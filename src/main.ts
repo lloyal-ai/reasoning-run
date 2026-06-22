@@ -1034,12 +1034,14 @@ main(function* () {
               } else if (process.platform === "win32") {
                 // Not `cmd /c start "" <url>`: cmd.exe re-parses the URL and an
                 // unquoted `&` (every issue URL has them between query params) is
-                // read as a command separator. PowerShell Start-Process with a
-                // single-quoted URL keeps `&` literal. The URL is percent-encoded
-                // so it can never contain a literal single quote.
+                // read as a command separator. Use PowerShell Start-Process, but
+                // pass the URL as a SEPARATE argv element bound to -FilePath — do
+                // NOT interpolate it into the -Command string (a `'`/`)` etc.
+                // would break out of the literal; buildIssueUrl also strict-
+                // encodes those, so this is defense in depth).
                 child = cpSpawn(
                   "powershell.exe",
-                  ["-NoProfile", "-NonInteractive", "-Command", `Start-Process '${url}'`],
+                  ["-NoProfile", "-NonInteractive", "-Command", "Start-Process", "-FilePath", url],
                   { stdio: "ignore", detached: true },
                 );
               } else {

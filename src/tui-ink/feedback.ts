@@ -148,11 +148,13 @@ export interface BuildBodyInput {
 }
 
 function encodedLen(title: string, body: string): number {
+  // Must mirror buildIssueUrl's encoder (encodeComponentStrict, hoisted below)
+  // so the cap is enforced against the ACTUAL final URL length.
   return (
     ISSUE_BASE.length +
     '?labels='.length + ISSUE_LABEL.length +
-    '&title='.length + encodeURIComponent(title).length +
-    '&body='.length + encodeURIComponent(body).length
+    '&title='.length + encodeComponentStrict(title).length +
+    '&body='.length + encodeComponentStrict(body).length
   );
 }
 
@@ -218,9 +220,21 @@ export function buildFeedbackBody(input: BuildBodyInput): { body: string; trunca
   return { body, truncated };
 }
 
+/** encodeURIComponent leaves `' ( ) * ! ~` raw. Those are inert in a URL but
+ *  become dangerous if the URL is ever interpolated into a shell/interpreter
+ *  string (e.g. a single quote breaking out of a PowerShell `'...'` literal in
+ *  the Windows browser-open). Encode them at the source so the URL is safe for
+ *  any consumer; GitHub accepts the percent-encoded forms. */
+function encodeComponentStrict(s: string): string {
+  return encodeURIComponent(s).replace(
+    /['()*!~]/g,
+    (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
+}
+
 export function buildIssueUrl(input: { title: string; body: string }): string {
   const q = `?labels=${ISSUE_LABEL}` +
-    `&title=${encodeURIComponent(input.title)}` +
-    `&body=${encodeURIComponent(input.body)}`;
+    `&title=${encodeComponentStrict(input.title)}` +
+    `&body=${encodeComponentStrict(input.body)}`;
   return ISSUE_BASE + q;
 }
