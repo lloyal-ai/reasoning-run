@@ -169,15 +169,31 @@ precedent rather than introducing a `uiPhase: 'feedback'` (which would force a
 
 The destination is a **public** issue, so we minimise what an error line can leak —
 but because an error `message` is an arbitrary string, scrubbing is **best-effort, not
-a guarantee.** `scrubError` applies this concrete redaction set:
+a guarantee.** `scrubError` applies this redaction set (order matters):
 
-1. Absolute **POSIX** paths (`/…`) → basename.
-2. Absolute **Windows** paths (`C:\…`, UNC `\\…`) → basename.
-3. The user's **home directory** → `~`.
-4. The configured **model / reranker / corpus / output** paths → basename/redacted.
-5. The session's **current query** string, if present.
-6. **URL query strings** (`?…`) stripped (may carry keys/search terms).
-7. Each error length-bounded.
+1. **Secrets** (`redactSecrets`): provider keys by prefix (`tvly`/`sk`/`ghp`/`AKIA`/…),
+   JWTs (whitespace-tolerant), `KEY=`/`KEY:` env fragments, `Bearer`/`Authorization`,
+   **basic-auth** (`curl -u user:pass`, `user:pass@host`), and high-entropy opaque
+   tokens (UUID, long hex ≥32, long mixed base64 ≥40 — guarded to require a digit+letter
+   so SNAKE_CASE identifiers and commit SHAs survive).
+2. The session/error **query**, matched **case-insensitively + whitespace-tolerantly**
+   (backends re-case/re-wrap it), and **per-error** against the query captured when that
+   error occurred (`ErrorRecord.query`), guarded to length ≥ 4.
+3. **URLs of any scheme** collapsed to `scheme://host` — drops inline credentials
+   (userinfo before the first slash), path, and query (http, ftp, ws, postgres,
+   mongodb, redis, …).
+4. Configured **model / reranker / corpus / output** paths → basename.
+5. **Home directory** → `~` (path-boundary, no sibling mangling).
+6. Remaining **POSIX / Windows / UNC** paths → basename.
+7. Length-bounded, **surrogate-safe** (a split emoji never leaves a lone surrogate that
+   would crash `encodeURIComponent`).
+
+**Documented residuals (best-effort limits, verified by adversarial fuzzing):** a
+*short, low-entropy, human-typed* secret in a non-URL/non-basic-auth position (e.g. a
+sub-32 hex nonce, a bare comma-delimited password) can survive; a query shorter than
+4 chars is not redacted (to avoid over-redacting common words); a query echoed only as
+a *prefix/substring* of the real query won't match. High-entropy secrets in those same
+positions **are** caught.
 
 We never attach the full trace. The real guarantee is the **consent + review** model:
 the user sees the exact issue body in their browser and clicks Submit themselves — so
