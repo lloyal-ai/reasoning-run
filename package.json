@@ -15,7 +15,7 @@
     "build": "esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --packages=external --loader:.eta=text --outfile=dist/bundle.mjs --minify --legal-comments=none",
     "build:watch": "esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --packages=external --loader:.eta=text --outfile=dist/bundle.mjs --watch",
     "start": "npm run build && node bin/run.js",
-    "smoke": "tsx src/tui-ink/__bus-smoke.ts && tsx src/tui-ink/__reducer-smoke.ts && tsx src/tui-ink/__config-smoke.ts && tsx src/__download-smoke.ts && tsx src/__rundir-smoke.ts && tsx src/__clarify-trunk-smoke.ts",
+    "smoke": "tsx src/tui-ink/__bus-smoke.ts && tsx src/tui-ink/__reducer-smoke.ts && tsx src/tui-ink/__config-smoke.ts && tsx src/tui-ink/__feedback-smoke.ts && tsx src/__download-smoke.ts && tsx src/__rundir-smoke.ts && tsx src/__clarify-trunk-smoke.ts",
     "smoke:visual": "tsx src/tui-ink/__visual-smoke.tsx",
     "prepublishOnly": "npm run build"
   },
