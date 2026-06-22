@@ -56,6 +56,11 @@ function redactSecrets(s: string): string {
     .replace(/\b([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|PASS)[A-Za-z0-9_]*)\s*[:=]\s*\S+/gi, '$1=[redacted]')
     // Bearer / Authorization headers.
     .replace(/\b(Bearer|Authorization)\b\s*:?\s*\S+/gi, '$1 [redacted]')
+    // Basic-auth shapes: `curl -u user:pass`, `--user user:pass`, and bare
+    // `user:pass@host` (high-confidence; catches short human passwords the
+    // entropy rules miss, without the false positives of a generic colon).
+    .replace(/(^|\s)(-u|--user)(\s+|=)\S+:\S+/gi, '$1$2$3[redacted]')
+    .replace(/\b([\w.-]+):([^\s:@/]+)@([\w.-]+|\[[^\]\s]+\])/g, '$1:[redacted]@$3')
     // UUIDs (session/correlation tokens).
     .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '[redacted-id]')
     // Long hex runs (md5/sha/40-hex tokens).

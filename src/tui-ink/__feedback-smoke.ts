@@ -173,6 +173,15 @@ check('scrubError redacts KEY:VALUE (colon) and password-after-colon', () => {
   assert.ok(!scrubError('db password: p@ssw0rdXYZ refused', {}).includes('p@ssw0rdXYZ'));
 });
 
+check('scrubError redacts basic-auth shapes (curl -u, user:pass@host)', () => {
+  assert.ok(!scrubError('curl -u admin:SuperSecretCurlPw https://x', {}).includes('SuperSecretCurlPw'));
+  assert.ok(!scrubError('auth kazim:hunter2pw@internal-host failed', {}).includes('hunter2pw'));
+});
+
+check('scrubError does not over-redact ordinary colon text (time, ratios)', () => {
+  assert.ok(scrubError('completed at 12:30:45 with ratio 3:4', {}).includes('12:30:45'));
+});
+
 check('scrubError matches query case-insensitively and across whitespace', () => {
   const out = scrubError('failed: "WHAT IS THE MERGER PRICE"', { query: 'what is   the merger price' });
   assert.ok(!/MERGER PRICE/.test(out), out);
