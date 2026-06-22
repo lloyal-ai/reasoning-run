@@ -175,6 +175,29 @@ export interface Toast {
   id: number;
 }
 
+export interface ErrorRecord {
+  /** The user-facing error message as surfaced via ui:error/boot:error. */
+  message: string;
+  /** Present for boot errors (model vs reranker). */
+  kind?: 'llm' | 'reranker';
+  at: number;
+  /** The query active when this error was captured. Stamped so /feedback can
+   *  scrub each error against its OWN query (the buffer outlives the query
+   *  that produced it). */
+  query?: string;
+}
+
+/** Non-sensitive environment snapshot for feedback issues. Assembled in
+ *  main.ts (needs os/process) and delivered via the `ui:env` event. */
+export interface EnvMeta {
+  version: string;     // reasoning.run version (pkg.version)
+  platform: string;    // os.platform()
+  arch: string;        // os.arch()
+  cpuModel: string;    // os.cpus()[0]?.model — practical AVX-512 signal
+  nodeVersion: string; // process.version
+  gpu: string;         // process.env.LLOYAL_GPU ?? 'unknown'
+}
+
 export interface AppState {
   query: string;
   warm: boolean;
@@ -267,6 +290,11 @@ export interface AppState {
    *  on reconfigure (`set_corpus_path`/`set_tavily_key`) — a config
    *  change is a strong signal of intent to use the app. */
   participation: Record<string, boolean>;
+  /** Capped (≈20) FIFO of errors seen this session. Source for /feedback.
+   *  Survives query/preflight resets so a crash isn't lost on the next ask. */
+  errors: ErrorRecord[];
+  /** Non-sensitive environment snapshot (seeded at boot via ui:env). */
+  env: EnvMeta | null;
 }
 
 export const initialState: AppState = {
@@ -304,4 +332,6 @@ export const initialState: AppState = {
   corpusStatus: null,
   bootError: null,
   participation: {},
+  errors: [],
+  env: null,
 };
