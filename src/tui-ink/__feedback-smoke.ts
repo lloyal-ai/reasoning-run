@@ -76,7 +76,12 @@ check('buildFeedbackBody includes scrubbed errors when consented', () => {
 });
 
 check('buildFeedbackBody truncates errors first under the cap, keeps message+env', () => {
-  const big = Array.from({ length: 50 }, (_, i) => ({ message: 'X'.repeat(400) + i, at: 0 }));
+  // Realistic long error text (with spaces) that the scrubber won't collapse to
+  // a single [redacted-token] — so it genuinely exercises error truncation.
+  const big = Array.from({ length: 50 }, (_, i) => ({
+    message: `research failed on attempt ${i} for host edge ${i}: ` + 'timed out waiting '.repeat(40),
+    at: 0,
+  }));
   const { body, truncated } = buildFeedbackBody({
     message: 'short note', env: ENV, config: null, mode: 'flat',
     errors: big, includeErrors: true, scrubCtx: {},
@@ -127,7 +132,9 @@ check('scrubError homeDir matches on path boundary only (no sibling mangling)', 
 });
 
 check('buildFeedbackBody encoded URL never exceeds the cap (note included)', () => {
-  const big = Array.from({ length: 200 }, (_, i) => ({ message: 'Y'.repeat(300) + i, at: 0 }));
+  const big = Array.from({ length: 200 }, (_, i) => ({
+    message: `error ${i}: ` + 'connection reset by peer '.repeat(20), at: 0,
+  }));
   const { body } = buildFeedbackBody({
     message: 'note', env: ENV, config: null, mode: 'flat',
     errors: big, includeErrors: true, scrubCtx: {},
@@ -143,4 +150,63 @@ check('buildFeedbackBody scrubs each error against its own captured query', () =
     includeErrors: true, scrubCtx: { query: 'a-different-current-query' },
   });
   assert.ok(!body.includes('secret-matter-A'), body);
+});
+
+// ── Red-team round 2: URL creds, prefix-less secrets, unicode crash, cap ──
+
+check('scrubError strips URL/connection-string userinfo credentials (any scheme)', () => {
+  assert.ok(!scrubError('could not read https://kazim:hunter2SECRET@github.com/x.git', {}).includes('hunter2SECRET'));
+  assert.ok(!scrubError('connect postgresql://dbuser:dbP4ssw0rd@10.0.0.5:5432/corpusdb failed', {}).includes('dbP4ssw0rd'));
+  assert.ok(!scrubError('redis://default:redisPassw0rd@cache.internal:6379 down', {}).includes('redisPassw0rd'));
+  const ipv6 = scrubError('https://user:secretpw@[2001:db8::1]:8443/x error', {});
+  assert.ok(!ipv6.includes('secretpw'), ipv6);
+});
+
+check('scrubError redacts prefix-less secrets (hex, base64, uuid)', () => {
+  assert.ok(!scrubError('auth failed for da39a3ee5e6b4b0d3255bfef95601890afd80709 retry', {}).includes('da39a3ee5e6b4b0d3255bfef95601890afd80709'));
+  assert.ok(!scrubError('session 550e8400-e29b-41d4-a716-446655440000 invalid', {}).includes('550e8400-e29b-41d4-a716-446655440000'));
+  assert.ok(!scrubError('blob aGVsbG8gd29ybGQgdGhpcyBpcyBhIHNlY3JldCBibG9i seen', {}).includes('aGVsbG8gd29ybGQgdGhpcyBpcyBhIHNlY3JldCBibG9i'));
+});
+
+check('scrubError redacts KEY:VALUE (colon) and password-after-colon', () => {
+  assert.ok(!scrubError('config myApiKey: hunter2secretvalue here', {}).includes('hunter2secretvalue'));
+  assert.ok(!scrubError('db password: p@ssw0rdXYZ refused', {}).includes('p@ssw0rdXYZ'));
+});
+
+check('scrubError matches query case-insensitively and across whitespace', () => {
+  const out = scrubError('failed: "WHAT IS THE MERGER PRICE"', { query: 'what is   the merger price' });
+  assert.ok(!/MERGER PRICE/.test(out), out);
+});
+
+check('scrubError preserves non-secret diagnostic tokens (no over-redaction)', () => {
+  // underscore-y constant must survive (it is the headline crash signal)
+  assert.ok(scrubError('createContext STATUS_ILLEGAL_INSTRUCTION at init', {}).includes('STATUS_ILLEGAL_INSTRUCTION'));
+});
+
+check('scrubError does not crash on a long emoji error and stays encodeable', () => {
+  const out = scrubError('💥'.repeat(400) + ' boom', {});
+  assert.equal(typeof out, 'string');
+  assert.doesNotThrow(() => encodeURIComponent(out));
+});
+
+check('buildFeedbackBody never throws on emoji and respects cap', () => {
+  const { body } = buildFeedbackBody({
+    message: 'A' + '😀'.repeat(5000), env: ENV, config: null, mode: 'flat',
+    errors: [], includeErrors: false, scrubCtx: {},
+  });
+  const url = buildIssueUrl({ title: feedbackTitle('A'), body });
+  assert.ok(url.length <= 7000, `len ${url.length}`);
+  assert.doesNotThrow(() => decodeURIComponent(url));
+});
+
+check('buildFeedbackBody message-marker truncation holds the cap across the boundary band', () => {
+  for (let n = 6800; n <= 7200; n += 13) {
+    const msg = 'Q'.repeat(n);
+    const { body } = buildFeedbackBody({
+      message: msg, env: ENV, config: null, mode: 'deep',
+      errors: [], includeErrors: false, scrubCtx: {},
+    });
+    const url = buildIssueUrl({ title: feedbackTitle(msg), body });
+    assert.ok(url.length <= 7000, `n=${n} len=${url.length}`);
+  }
 });
