@@ -34,6 +34,7 @@ import { Box, Text, useInput } from 'ink';
 import type { AppState } from '../state';
 import { useCommand } from '../hooks/useCommand';
 import { TextInput } from './TextInput';
+import { FeedbackPanel } from './FeedbackPanel';
 import { shortPath } from '../path-utils';
 
 type Field = 'query' | 'web' | 'scan' | 'output' | 'model' | 'reranker';
@@ -54,6 +55,7 @@ const COMMANDS: SlashCmd[] = [
   { name: 'model', desc: 'Set local LLM .gguf path', kind: 'value' },
   { name: 'reranker', desc: 'Set local reranker .gguf path', kind: 'value' },
   { name: 'output', desc: 'Set output directory', kind: 'value' },
+  { name: 'feedback', desc: 'Send feedback (opens a prefilled GitHub issue)', kind: 'instant' },
   { name: 'deep', desc: 'Use deep (chain) reasoning', kind: 'instant' },
   { name: 'flat', desc: 'Use flat (parallel) reasoning', kind: 'instant' },
   { name: 'help', desc: 'Show this list', kind: 'instant' },
@@ -93,6 +95,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
   const defaultMode = state.config?.defaults.reasoningMode ?? 'flat';
   const [mode, setMode] = useState<'flat' | 'deep'>(defaultMode);
   const [field, setField] = useState<Field>('query');
+  const [feedback, setFeedback] = useState<{ message: string } | null>(null);
   const [query, setQuery] = useState('');
   const [draft, setDraft] = useState('');
   const [showHelp, setShowHelp] = useState(false);
@@ -235,7 +238,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         return;
       }
     },
-    { isActive: field === 'query' && chipFocus === null },
+    { isActive: feedback === null && field === 'query' && chipFocus === null },
   );
 
   // Chip-focus input handling: active when a source/setting chip is the
@@ -324,7 +327,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         }
       }
     },
-    { isActive: chipFocus !== null && field === 'query' },
+    { isActive: feedback === null && chipFocus !== null && field === 'query' },
   );
 
   const submitQuery = (q: string): void => {
@@ -371,6 +374,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
       else if (name === 'flat') setMode('flat');
       else if (name === 'quit') dispatch({ type: 'quit' });
       else if (name === 'help') setShowHelp(true);
+      else if (name === 'feedback') { setFeedback({ message: value }); return; }
       return;
     }
     // value command. Internal dispatch names stay tavily/corpus to match
@@ -433,6 +437,18 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
     setField('query');
     setDraft('');
   };
+
+  if (feedback) {
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+        <FeedbackPanel
+          state={state}
+          initialMessage={feedback.message}
+          onClose={() => setFeedback(null)}
+        />
+      </Box>
+    );
+  }
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
