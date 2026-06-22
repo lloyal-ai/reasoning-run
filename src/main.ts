@@ -13,7 +13,9 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { spawn as cpSpawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import {
   main,
@@ -71,6 +73,7 @@ import {
 } from "./models";
 import { RunDirSink } from "./run-dir";
 import { resolvePath } from "./tui-ink/path-utils";
+import pkg from "../package.json";
 
 // ── CLI args ─────────────────────────────────────────────────────
 
@@ -284,6 +287,18 @@ const errorMessage = (err: unknown): string =>
 const errorStack = (err: unknown): string =>
   err instanceof Error ? (err.stack ?? err.message) : String(err);
 
+function buildEnvMeta(_config: { model?: { path?: string } } | null): import("./tui-ink/state").EnvMeta {
+  const cpu = os.cpus?.()[0]?.model ?? "unknown";
+  return {
+    version: pkg.version,
+    platform: os.platform(),
+    arch: os.arch(),
+    cpuModel: cpu,
+    nodeVersion: process.version,
+    gpu: process.env.LLOYAL_GPU ?? "unknown",
+  };
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 
 main(function* () {
@@ -347,6 +362,7 @@ main(function* () {
       bootstrap.push({ type: "download:plan", entries: initialPlanEntries });
     }
     inkInstance = mod.render(uiChannel, (cmd) => commands.send(cmd), bootstrap);
+    uiChannel.send({ type: "ui:env", env: buildEnvMeta(/* config */ null) });
     yield* ensure(() => { inkInstance?.unmount(); });
   } else {
     // Non-TTY / JSONL: drain the bus to JSONL stdout. Synchronous subscribe
@@ -1009,6 +1025,23 @@ main(function* () {
               skipped: saved.skipped,
             });
             if (resolved) yield* events.send({ type: "ui:composer" });
+          } else if (cmd.type === "open_feedback") {
+            try {
+              const url = cmd.url;
+              let child;
+              if (process.platform === "darwin") {
+                child = cpSpawn("open", [url], { stdio: "ignore", detached: true });
+              } else if (process.platform === "win32") {
+                // `start` is a cmd.exe builtin — cannot be spawned directly.
+                child = cpSpawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true });
+              } else {
+                child = cpSpawn("xdg-open", [url], { stdio: "ignore", detached: true });
+              }
+              child.on("error", () => { /* best-effort; panel shows the URL */ });
+              child.unref();
+            } catch {
+              // Swallow — the FeedbackPanel keeps the URL on screen for manual copy.
+            }
           } else if (cmd.type === "submit_query") {
             if (registry.enabled().length === 0) {
               yield* events.send({

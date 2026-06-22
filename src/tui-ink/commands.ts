@@ -26,4 +26,5 @@ export type Command =
   | { type: 'set_model_path'; path: string }
   | { type: 'set_reranker_path'; path: string }
   | { type: 'toggle_participation'; name: string }
+  | { type: 'open_feedback'; url: string }
   | { type: 'quit' };
