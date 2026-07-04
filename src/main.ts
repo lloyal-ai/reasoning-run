@@ -625,15 +625,33 @@ main(function* () {
   // rather than silently falling back to CPU; the loader's own
   // LLOYAL_NO_FALLBACK knob does exactly that. A user-set LLOYAL_NO_FALLBACK
   // is never overridden.
+  //
+  // Tracks whether WE set LLOYAL_NO_FALLBACK (vs the user), so a reload
+  // where the backend is no longer explicitly requested clears exactly
+  // what we own and nothing else.
+  let noFallbackOwned = false;
   const applyGpuEnv = (cfg: Pick<LoadedConfig, "config" | "origin">): void => {
     const gpu = cfg.config.model.gpu;
-    if (!gpu) return;
-    process.env.LLOYAL_GPU = gpu;
-    if (
-      (cfg.origin.gpu === "cli" || cfg.origin.gpu === "file") &&
-      process.env.LLOYAL_NO_FALLBACK === undefined
-    ) {
+    if (gpu) {
+      process.env.LLOYAL_GPU = gpu;
+    } else if (process.env.LLOYAL_GPU !== undefined) {
+      // Mirror the resolved config exactly: with no gpu from any rung, a
+      // leftover env value (stale from a prior iteration, or a raw invalid
+      // value loadConfig rejected) must not keep steering the native loader.
+      process.stderr.write(
+        `Ignoring LLOYAL_GPU=${process.env.LLOYAL_GPU} (not one of cuda|vulkan|default)\n`,
+      );
+      delete process.env.LLOYAL_GPU;
+    }
+    const explicit =
+      gpu !== undefined &&
+      (cfg.origin.gpu === "cli" || cfg.origin.gpu === "file");
+    if (explicit && process.env.LLOYAL_NO_FALLBACK === undefined) {
       process.env.LLOYAL_NO_FALLBACK = "1";
+      noFallbackOwned = true;
+    } else if (!explicit && noFallbackOwned) {
+      delete process.env.LLOYAL_NO_FALLBACK;
+      noFallbackOwned = false;
     }
   };
 
