@@ -654,17 +654,17 @@ main(function* () {
       process.env.LLOYAL_GPU = gpu;
     } else if (process.env.LLOYAL_GPU !== undefined) {
       // Mirror the resolved config exactly: with no gpu from any rung, a
-      // leftover env value (stale from a prior iteration, or a raw invalid
-      // value loadConfig rejected) must not keep steering the native loader.
-      // Surface the drop through the bus (Ink toast / bridge / jsonl) — a
-      // raw stderr write here would interleave with Ink's renderer; plain
-      // one-shot mode has no bus printer, so it keeps the stderr line.
-      // Covers both drop causes: an invalid launch value (loadConfig
-      // rejected it) and a stale self-injection after config cleared.
-      const message = `Ignoring LLOYAL_GPU=${process.env.LLOYAL_GPU} — no valid backend configured (expected cuda|vulkan|default)`;
-      uiChannel.send({ type: "ui:error", message });
-      if (!useInk && !bridgeMode && !jsonlMode) {
-        process.stderr.write(`${message}\n`);
+      // leftover env value (invalid at launch, or a stale self-injection
+      // after config cleared) must not keep steering the native loader.
+      // This is a non-fatal notice, not an error — no bus event: ui:error's
+      // reducer forces uiPhase back to 'composer', which would corrupt the
+      // boot phase this runs in. Plain one-shot mode keeps a stderr line
+      // (nothing to corrupt there); elsewhere the resolved backend is
+      // already visible via config:loaded.
+      if (!useInk && !bridgeMode) {
+        process.stderr.write(
+          `Ignoring LLOYAL_GPU=${process.env.LLOYAL_GPU} — no valid backend configured (expected cuda|vulkan|default)\n`,
+        );
       }
       delete process.env.LLOYAL_GPU;
     }

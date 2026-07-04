@@ -1,8 +1,9 @@
 /**
- * GPU/model arg-selection smoke — spawns the real entry (`src/main.ts` via
- * tsx) with the invalid-argument matrix and asserts exit codes + stderr.
- * Every case here exits during flag validation, BEFORE any model load, so
- * this stays fast enough for the pre-build smoke stage.
+ * GPU/model arg-selection smoke — builds the esbuild bundle, then spawns
+ * the real entry (`bin/run.js`) with the invalid-argument matrix and
+ * asserts exit codes + stderr. Every case here exits during flag
+ * validation, BEFORE any model load, so this stays fast enough for the
+ * smoke stage.
  *
  * The happy-path selection (CLI > env > file > default) is covered at the
  * loadConfig layer in tui-ink/__config-smoke.ts; the fail-loud boot on an
