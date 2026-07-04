@@ -134,8 +134,8 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
     envLocked: boolean;
   }>({
     chipFocus,
-    tavilyKey: state.config?.sources.tavilyKey ?? '',
-    corpusPath: state.config?.sources.corpusPath ?? '',
+    tavilyKey: String(state.config?.apps.web?.tavilyKey ?? ''),
+    corpusPath: String(state.config?.apps.corpus?.corpusPath ?? ''),
     outputDir: state.config?.sources.outputDir ?? '',
     envLocked: false,
   });
@@ -160,21 +160,24 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
     setMode(defaultMode);
   }, [defaultMode]);
 
-  const tavilyOrigin = state.configOrigin?.tavilyKey ?? 'unset';
-  const corpusOrigin = state.configOrigin?.corpusPath ?? 'unset';
+  const storedTavily = String(state.config?.apps.web?.tavilyKey ?? '');
+  const storedCorpus = String(state.config?.apps.corpus?.corpusPath ?? '');
   const outputOrigin = state.configOrigin?.outputDir ?? 'default';
-  const hasTavily = tavilyOrigin !== 'unset';
+  const hasTavily = storedTavily !== '';
   // Web is always available — the web app falls back to a keyless provider when
   // no Tavily key is set — so there is always at least one research source.
   const hasSource = true;
-  const envLocked = tavilyOrigin === 'env';
+  // Env-provided TAVILY_API_KEY is consumed inside the web app factory; the
+  // harness config layer no longer tracks its origin, so the composer doesn't
+  // lock the field on env any more (the Settings drawer is the richer surface).
+  const envLocked = false;
 
   // Re-mirror chip state into the ref every render so the chip useInput
   // handler always sees fresh values (closure stale-read workaround).
   chipStateRef.current = {
     chipFocus,
-    tavilyKey: state.config?.sources.tavilyKey ?? '',
-    corpusPath: state.config?.sources.corpusPath ?? '',
+    tavilyKey: storedTavily,
+    corpusPath: storedCorpus,
     outputDir: state.config?.sources.outputDir ?? '',
     envLocked,
   };
@@ -373,12 +376,12 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
       else if (name === 'help') setShowHelp(true);
       return;
     }
-    // value command. Internal dispatch names stay tavily/corpus to match
-    // the existing commands.ts + main.ts handlers + harness.json schema —
-    // we map at the slash boundary only.
+    // value command. The /web and /scan slashes map to per-app config via
+    // the generic set_app_config command (name = the app's manifest.name,
+    // values = its whole config object).
     if (value) {
-      if (name === 'web') dispatch({ type: 'set_tavily_key', key: value });
-      else if (name === 'scan') dispatch({ type: 'set_corpus_path', path: value });
+      if (name === 'web') dispatch({ type: 'set_app_config', name: 'web', values: { tavilyKey: value } });
+      else if (name === 'scan') dispatch({ type: 'set_app_config', name: 'corpus', values: { corpusPath: value } });
       else if (name === 'output') dispatch({ type: 'set_output_dir', path: value });
       else if (name === 'model') dispatch({ type: 'set_model_path', path: value });
       else if (name === 'reranker') dispatch({ type: 'set_reranker_path', path: value });
@@ -387,10 +390,10 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
     // No value — open the inline editor pre-filled with the current value.
     if (name === 'web') {
       if (envLocked) return;
-      setDraft(state.config?.sources.tavilyKey ?? '');
+      setDraft(String(state.config?.apps.web?.tavilyKey ?? ''));
       setField('web');
     } else if (name === 'scan') {
-      setDraft(state.config?.sources.corpusPath ?? '');
+      setDraft(String(state.config?.apps.corpus?.corpusPath ?? ''));
       setField('scan');
     } else if (name === 'output') {
       setDraft(state.config?.sources.outputDir ?? '');
@@ -405,13 +408,24 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
   };
 
   const commitWeb = (): void => {
-    dispatch({ type: 'set_tavily_key', key: draft.trim() });
+    const key = draft.trim();
+    // Empty input clears the key (whole-replace with {}) → keyless fallback.
+    dispatch({
+      type: 'set_app_config',
+      name: 'web',
+      values: key ? { tavilyKey: key } : {},
+    });
     setField('query');
     setDraft('');
   };
 
   const commitScan = (): void => {
-    dispatch({ type: 'set_corpus_path', path: draft.trim() });
+    const p = draft.trim();
+    dispatch({
+      type: 'set_app_config',
+      name: 'corpus',
+      values: p ? { corpusPath: p } : {},
+    });
     setField('query');
     setDraft('');
   };
@@ -551,7 +565,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
       <Box marginTop={0}>
         <SourceChip
           label="Web"
-          origin={tavilyOrigin}
+          origin={hasTavily ? 'file' : 'unset'}
           value={hasTavily ? '(Tavily)' : '(Keyless)'}
           alwaysActive
           disabled={envLocked}
@@ -563,16 +577,16 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         <Text>  </Text>
         <SourceChip
           label="Scan"
-          origin={corpusOrigin}
+          origin={storedCorpus ? 'file' : 'unset'}
           value={
-            state.config?.sources.corpusPath
+            storedCorpus
               ? state.corpusStatus
                 ? `${state.corpusStatus.fileCount} files`
-                : state.config.sources.corpusPath
+                : storedCorpus
               : null
           }
           participation={
-            !state.config?.sources.corpusPath
+            !storedCorpus
               ? 'unconfigured'
               : state.participation['corpus'] !== false
                 ? 'included'

@@ -184,9 +184,12 @@ check("main.ts: legacy latestUserInput is GONE", () => {
 });
 
 check("main.ts: accept_plan threads userSidePending to runResearchPlan", () => {
+  // accept_plan snapshots pendingPlan into `acceptedPlan` before clearing it
+  // and starting the run in a child fiber (Stop escape hatch), then threads
+  // the clarify flag from that snapshot. Match the snapshot var name.
   assert.ok(
-    /userSidePending:\s*pendingPlan\.clarifyExchanged/.test(mainSrc),
-    "accept_plan branch must thread `userSidePending: pendingPlan.clarifyExchanged` to runResearchPlan",
+    /userSidePending:\s*acceptedPlan\.clarifyExchanged/.test(mainSrc),
+    "accept_plan branch must thread `userSidePending: acceptedPlan.clarifyExchanged` to runResearchPlan",
   );
 });
 

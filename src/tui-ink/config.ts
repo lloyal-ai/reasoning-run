@@ -17,15 +17,26 @@ import * as path from 'node:path';
 import { resolvePath } from './path-utils';
 
 export interface ConfigSources {
-  tavilyKey?: string;
-  corpusPath?: string;
   /** Where per-query run-dirs (report.md + annexure-N.md) and the session
-   *  trace.jsonl get written. Default = process.cwd() at boot. */
+   *  trace.jsonl get written. Default = process.cwd() at boot. This is
+   *  harness config — NOT a per-app config object. */
   outputDir?: string;
 }
 
+/** Per-app stored config, keyed by `manifest.name` → the app's config object
+ *  (whatever the app's `configSchema` declares; e.g. `{ corpusPath }`,
+ *  `{ tavilyKey }`). The harness never reads inside these objects — it
+ *  whole-replaces an app's entry and hands it to the registry, which
+ *  validates against the app's `configSchema` on enable. Secrets (e.g.
+ *  `tavilyKey`) live here verbatim; env-provided secrets win at the app
+ *  factory and are never written back. */
+export type ConfigApps = Record<string, Record<string, unknown>>;
+
 export interface ConfigDefaults {
   reasoningMode: 'flat' | 'deep';
+  /** Run effort preset — the session default for the composer's effort control
+   *  (pure policy: budget + planner breadth + recovery cap). @default 'high' */
+  effort: 'low' | 'medium' | 'high';
   maxTurns: number;
 }
 
@@ -41,15 +52,18 @@ export interface ConfigModel {
 export interface Config {
   version: 1;
   sources: ConfigSources;
+  /** Per-app stored config, keyed by `manifest.name`. The harness seeds
+   *  `configStore` from this on boot (loop over entries) and whole-replaces
+   *  an app's entry on `set_app_config`. Persisted under `apps[name]`. */
+  apps: ConfigApps;
   defaults: ConfigDefaults;
   model: ConfigModel;
 }
 
-/** Which layer supplied a given field — used for composer UI hints like
- *  `Tavily ✓ (env)`. Computed per-field at loadConfig time. */
+/** Which layer supplied a given harness-level field — used for composer UI
+ *  hints. Per-app config lives in `Config.apps` and carries no origin
+ *  tracking (apps validate their own config at enable time). */
 export interface ConfigOrigin {
-  tavilyKey: 'env' | 'file' | 'cli' | 'unset';
-  corpusPath: 'file' | 'cli' | 'unset';
   reasoningMode: 'cli' | 'file' | 'default';
   modelPath: 'cli' | 'file' | 'default';
   reranker: 'cli' | 'file' | 'default';
@@ -66,8 +80,6 @@ export interface LoadedConfig {
 }
 
 export interface CliOverrides {
-  tavilyKey?: string;
-  corpusPath?: string;
   reasoningMode?: 'flat' | 'deep';
   modelPath?: string;
   reranker?: string;
@@ -90,8 +102,10 @@ function builtinDefaults(): Config {
   return {
     version: 1,
     sources: {},
+    apps: {},
     defaults: {
       reasoningMode: 'flat',
+      effort: 'high',
       maxTurns: 10,
     },
     model: {},
@@ -112,12 +126,36 @@ function readFileIfExists(p: string): Config | null {
     return {
       version: 1,
       sources: { ...defaults.sources, ...(parsed.sources ?? {}) },
+      apps: { ...defaults.apps, ...(parsed.apps ?? {}) },
       defaults: { ...defaults.defaults, ...(parsed.defaults ?? {}) },
       model: { ...defaults.model, ...(parsed.model ?? {}) },
     };
   } catch {
     return null;
   }
+}
+
+/** Resolve path-shaped string values in one app's config object, with no
+ *  per-app name knowledge. A value is treated as a path when its property
+ *  name ends in "Path" (case-insensitive) OR the string starts with `~`,
+ *  `/`, or `.` — the same boundary-resolve discipline the harness-level
+ *  path fields use. Non-string / non-path values pass through untouched. */
+function resolveAppConfigPaths(
+  cfg: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(cfg)) {
+    if (
+      typeof value === 'string' &&
+      value !== '' &&
+      (/path$/i.test(key) || /^[~/.]/.test(value))
+    ) {
+      out[key] = resolvePath(value);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
 }
 
 export function loadConfig(
@@ -129,20 +167,16 @@ export function loadConfig(
   const fromFile = readFileIfExists(resolvedPath);
   const base = fromFile ?? builtinDefaults();
 
-  const envTavily = env.TAVILY_API_KEY?.trim() || undefined;
   const envNCtxStr = env.LLAMA_CTX_SIZE?.trim();
   const envNCtx = envNCtxStr && /^\d+$/.test(envNCtxStr)
     ? parseInt(envNCtxStr, 10)
     : undefined;
 
   // ── Merge with precedence: CLI > env > file > default ──
-  // Path-shaped fields (corpusPath, outputDir, modelPath) get resolved
-  // through resolvePath: ~ expansion + relative→absolute. Idempotent on
+  // Path-shaped fields (outputDir, modelPath) get resolved through
+  // resolvePath: ~ expansion + relative→absolute. Idempotent on
   // already-absolute paths. Defensive against stale harness.json values
   // written before the boundary-resolve pattern landed (literal "~").
-  const tavilyKey = cli.tavilyKey ?? envTavily ?? base.sources.tavilyKey;
-  const rawCorpusPath = cli.corpusPath ?? base.sources.corpusPath;
-  const corpusPath = rawCorpusPath ? resolvePath(rawCorpusPath) : undefined;
   const rawOutputDir = cli.outputDir ?? base.sources.outputDir;
   const outputDir = rawOutputDir ? resolvePath(rawOutputDir) : undefined;
   const reasoningMode =
@@ -152,29 +186,28 @@ export function loadConfig(
   const reranker = cli.reranker ?? base.model.reranker;
   const nCtx = cli.nCtx ?? envNCtx ?? base.model.nCtx;
 
+  // Per-app config passes through verbatim, with path-shaped string values
+  // resolved generically (no app-name knowledge): any property whose name
+  // ends in "Path" or whose value looks like a filesystem path (~ / . prefix)
+  // gets ~-expanded + made absolute, matching the harness-level path fields.
+  const apps: ConfigApps = {};
+  for (const [name, cfg] of Object.entries(base.apps)) {
+    apps[name] = resolveAppConfigPaths(cfg);
+  }
+
   const config: Config = {
     version: 1,
-    sources: { tavilyKey, corpusPath, outputDir },
+    sources: { outputDir },
+    apps,
     defaults: {
       reasoningMode,
+      effort: base.defaults.effort,
       maxTurns: base.defaults.maxTurns,
     },
     model: { path: modelPath, reranker, nCtx },
   };
 
   const origin: ConfigOrigin = {
-    tavilyKey: cli.tavilyKey
-      ? 'cli'
-      : envTavily
-        ? 'env'
-        : base.sources.tavilyKey
-          ? 'file'
-          : 'unset',
-    corpusPath: cli.corpusPath
-      ? 'cli'
-      : base.sources.corpusPath
-        ? 'file'
-        : 'unset',
     reasoningMode: cli.reasoningMode
       ? 'cli'
       : fromFile?.defaults.reasoningMode
@@ -201,14 +234,21 @@ export function loadConfig(
 
 // ── Save ────────────────────────────────────────────────────────────
 
-/** Writes `harness.json` atomically with a tmp-file-and-rename. Honors the
- *  "don't persist env-provided secrets" rule: if `TAVILY_API_KEY` is set
- *  and the patch included a `sources.tavilyKey`, that field is dropped and
- *  reported in `skipped`. */
+/** Writes `harness.json` atomically with a tmp-file-and-rename.
+ *
+ *  Per-app config (`patch.apps`) is read-modify-written into the existing
+ *  `apps` map: each app name in the patch WHOLE-REPLACES that app's config
+ *  object, leaving other apps untouched. An empty object (`{}`) is a valid
+ *  whole-replace meaning "this app has no config" (clear semantics) — the
+ *  key is kept so a re-enable still sees an entry. Harness-level fields
+ *  (`sources.outputDir`) keep their empty-string-clears-the-key rule. */
 export function saveConfig(
   patch: Partial<Config>,
   configPath: string,
-  env: NodeJS.ProcessEnv = process.env,
+  // env reserved for future precedence rules; secrets are no longer dropped
+  // here — env fallback for a given key (e.g. TAVILY_API_KEY) lives in the
+  // owning app's factory, not the harness config layer.
+  _env: NodeJS.ProcessEnv = process.env,
 ): SaveResult {
   const resolvedPath = path.resolve(configPath);
   const current = readFileIfExists(resolvedPath) ?? builtinDefaults();
@@ -219,18 +259,19 @@ export function saveConfig(
     ...(patch.sources ?? {}),
   };
   // Empty string = explicit clear. Delete the key rather than persisting ''.
-  if (patch.sources?.tavilyKey === '') delete nextSources.tavilyKey;
-  if (patch.sources?.corpusPath === '') delete nextSources.corpusPath;
   if (patch.sources?.outputDir === '') delete nextSources.outputDir;
-  if (env.TAVILY_API_KEY && patch.sources && 'tavilyKey' in patch.sources) {
-    // Env wins — drop any attempted write of the secret.
-    delete nextSources.tavilyKey;
-    skipped.push('sources.tavilyKey');
+
+  // Per-app config: whole-replace each named app's object (read-modify-write
+  // the map). Other apps' entries are preserved.
+  const nextApps: ConfigApps = { ...current.apps };
+  for (const [name, cfg] of Object.entries(patch.apps ?? {})) {
+    nextApps[name] = { ...cfg };
   }
 
   const next: Config = {
     version: 1,
     sources: nextSources,
+    apps: nextApps,
     defaults: { ...current.defaults, ...(patch.defaults ?? {}) },
     model: { ...current.model, ...(patch.model ?? {}) },
   };

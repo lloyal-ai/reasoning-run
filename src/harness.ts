@@ -31,6 +31,7 @@
 
 import { call, resource, createContext } from "effection";
 import type { Operation } from "effection";
+import { EFFORT_PRESETS, type Effort } from "./effort-presets";
 import type { Session, SessionContext } from "@lloyal-labs/sdk";
 import {
   Ctx,
@@ -45,7 +46,7 @@ import {
   DefaultAgentPolicy,
   ContextPressure,
 } from "@lloyal-labs/lloyal-agents";
-import type { AgentEvent, App, AgentRenderCtx, Agent } from "@lloyal-labs/lloyal-agents";
+import type { AgentEvent, App, AgentRenderCtx, Agent, DefaultAgentPolicyOpts } from "@lloyal-labs/lloyal-agents";
 import type { StepEvent, OpTiming } from "./tui-ink";
 import {
   reportTool,
@@ -89,29 +90,58 @@ const RECOVERY = parsePrompt(RECOVERY_RAW);
 const SYNTHESIZE_DEEP = parsePrompt(SYNTHESIZE_RAW);
 const SYNTHESIZE_FLAT = parsePrompt(SYNTHESIZE_FLAT_RAW);
 
-function createResearchPolicy(): DefaultAgentPolicy {
-  return new DefaultAgentPolicy({
-    budget: {
-      context: { softLimit: 2048, hardLimit: 1024 },
-      time: { softLimit: 240_000, hardLimit: 360_000 },
-    },
-    recovery: { prompt: RECOVERY },
+// Run-effort type + presets live in `./effort-presets` (shared, dep-free) so the
+// Settings UI can display the same policy values the harness applies here.
+export type { Effort } from "./effort-presets";
+
+/**
+ * Research policy for a run effort + reasoning mode. `high` reproduces the
+ * historical budget exactly. Parallel recovery is a flat-mode + low-effort
+ * concern (a small cohort folded fast); everything else staggers — and the
+ * WindDown drain forces the fold regardless of this default.
+ */
+function createResearchPolicy(
+  effort: Effort,
+  mode: "flat" | "deep",
+  isAsk = false,
+): DefaultAgentPolicy {
+  const preset = EFFORT_PRESETS[effort];
+  const opts: DefaultAgentPolicyOpts = {
+    budget: preset.budget,
+    // Ask also salvages an involuntarily-dropped agent (pressure/time before it answers)
+    // instead of skipping it below the 2-tool/100-token floor — its work shouldn't be lost.
+    recovery: isAsk
+      ? { prompt: RECOVERY, minToolCalls: 0, minTokens: 0 }
+      : { prompt: RECOVERY },
     terminalToolName: "report",
-  });
+    // low AND medium bin-pack recovery in-loop (parallel); high stays staggered
+    // (serial, full-headroom, lossless). Deep is always staggered.
+    recoveryShape:
+      mode === "flat" && effort !== "high" ? "parallel" : "staggered",
+    reportBudget: preset.reportBudget,
+    // Per-effort explore→exploit threshold: low always exploits (strict, on-topic);
+    // medium tightens at 40% KV used; high explores novel facts until 60% used.
+    shouldExplore: preset.shouldExplore,
+  };
+  // Ask (skipPlanner): accept a direct free-text answer from context — 0 tool calls OK.
+  // Non-Ask multi-agent research keeps the tool-gathering guard (a lazy research agent
+  // that answers without evidence is still pushed to research/recovery).
+  return isAsk ? new DirectAnswerPolicy(opts) : new DefaultAgentPolicy(opts);
 }
 
 /**
- * Synth policy — synth's entire output IS the answer. There's no tool-call
- * disambiguation to do (synth has no tools), so end-of-generation is the
- * natural terminal signal. The streamed content becomes `agent.result`
- * directly via the `free_text_report` action.
+ * Direct-answer policy — the agent's free text IS the answer, accepted even with ZERO
+ * tool calls. `DefaultAgentPolicy._handleNoToolCall` gates accepting free text as the
+ * result behind `agent.toolCallCount > 0` — a guard against research agents skipping
+ * evidence-gathering; this bypasses it (the streamed content becomes `agent.result` via
+ * the `free_text_return` action → a voluntary `agent:return`, no drop/recovery).
  *
- * `DefaultAgentPolicy._handleNoToolCall` gates `free_text_report` behind
- * `agent.toolCallCount > 0` — a guard against research agents skipping
- * evidence-gathering. Synth doesn't gather evidence; the prompt + parent
- * KV ARE the evidence. Bypass that guard here.
+ * Used by **synth** (no tools — the prompt + parent KV ARE the evidence) and by **Ask**
+ * (a single research agent answering directly from the prior report's context, via
+ * `createResearchPolicy(..., isAsk=true)`). Ask can still choose to gather evidence
+ * (tool calls) — this only ensures a direct answer isn't discarded.
  */
-class SynthPolicy extends DefaultAgentPolicy {
+class DirectAnswerPolicy extends DefaultAgentPolicy {
   override onProduced(
     ...args: Parameters<DefaultAgentPolicy["onProduced"]>
   ): ReturnType<DefaultAgentPolicy["onProduced"]> {
@@ -179,6 +209,9 @@ export interface HarnessOpts {
   maxTurns: number;
   findingsMaxChars?: number;
   reasoningMode: "flat" | "deep";
+  /** Run effort preset — pure policy (budget + planner breadth + recovery cap),
+   *  no prompt effect. @see EFFORT_PRESETS. */
+  effort: Effort;
 }
 
 export interface RunQueryOpts extends HarnessOpts {
@@ -215,6 +248,11 @@ export interface RunResearchPlanOpts extends HarnessOpts {
    *  `session.prefillAssistant` to close the pair rather than `commitTurn`
    *  (which would re-emit the user side). */
   userSidePending?: boolean;
+  /** Ask mode (composer `skipPlanner`): a single warm-forked agent that may answer
+   *  DIRECTLY from the prior report's context. Uses `DirectAnswerPolicy` so a free-text
+   *  answer with 0 tool calls is captured (not discarded by the tool-gathering guard).
+   *  Omitted/false ⇒ normal research policy (evidence-gathering enforced). */
+  isAsk?: boolean;
 }
 
 export interface PreflightResult {
@@ -532,7 +570,7 @@ export function* useCoverage(
 export function* runPlanner(
   query: string,
   session: Session,
-  opts: { reasoningMode: "flat" | "deep"; context?: string; appFilter?: readonly string[] },
+  opts: { reasoningMode: "flat" | "deep"; effort: Effort; context?: string; appFilter?: readonly string[] },
 ): Operation<PlanResult> {
   const events = yield* Events.expect();
   const send = (ev: StepEvent): Operation<void> =>
@@ -559,7 +597,7 @@ export function* runPlanner(
     // the 8-agent shared-spine overflow seen in
     // trace-2026-06-01T07-46-17-924 (8 corpus-heavy tasks → all agents
     // softcut/settle-reject, no recovery, empty synth).
-    maxTasks: 6,
+    maxTasks: EFFORT_PRESETS[opts.effort].maxTasks,
     availableApps: apps.length >= 2 ? apps : undefined,
   });
   const planContext = opts.context
@@ -646,6 +684,7 @@ export function* runQuery(
 
   const plan = yield* runPlanner(query, session, {
     reasoningMode: opts.reasoningMode,
+    effort: opts.effort,
     context: plannerContext,
     appFilter: opts.appFilter,
   });
@@ -766,7 +805,7 @@ export function* runResearchPlan(
         terminal: reportTool,
         maxTurns: opts.maxTurns,
         pruneOnReturn: true,
-        policy: createResearchPolicy(),
+        policy: createResearchPolicy(opts.effort, opts.reasoningMode, opts.isAsk),
         scorer: primaryScorer,
         enableThinking: true,
         orchestrate:
@@ -902,7 +941,7 @@ export function* runResearchPlan(
         systemPrompt: renderTemplate(synthPrompt.system, synthCtx),
         task: renderTemplate(synthPrompt.user, synthCtx),
         parent: querySpine,
-        policy: new SynthPolicy(),
+        policy: new DirectAnswerPolicy(),
         maxTurns: opts.maxTurns,
       });
 

@@ -37,98 +37,75 @@ check('load: missing file → defaults', () => {
   );
   assert.equal(loadedFromFile, false);
   assert.equal(config.defaults.reasoningMode, 'flat');
-  assert.equal(config.sources.tavilyKey, undefined);
-  assert.equal(origin.tavilyKey, 'unset');
+  assert.deepEqual(config.apps, {});
   assert.equal(origin.reasoningMode, 'default');
 });
 
-check('load: env var supplies tavilyKey', () => {
-  const dir = scratchDir('env');
-  const { config, origin } = loadConfig(
-    path.join(dir, 'harness.json'),
-    {},
-    { TAVILY_API_KEY: 'tvly-env' },
-  );
-  assert.equal(config.sources.tavilyKey, 'tvly-env');
-  assert.equal(origin.tavilyKey, 'env');
-});
-
-check('load: file supplies tavilyKey when env absent', () => {
-  const dir = scratchDir('file');
+check('load: per-app config map round-trips from file', () => {
+  const dir = scratchDir('apps');
   const file = path.join(dir, 'harness.json');
   fs.writeFileSync(
     file,
     JSON.stringify({
       version: 1,
-      sources: { tavilyKey: 'tvly-file' },
+      apps: { web: { tavilyKey: 'tvly-file' } },
       defaults: { reasoningMode: 'flat' },
     }),
   );
   const { config, origin } = loadConfig(file, {}, {});
-  assert.equal(config.sources.tavilyKey, 'tvly-file');
-  assert.equal(origin.tavilyKey, 'file');
+  assert.equal(config.apps.web.tavilyKey, 'tvly-file');
   assert.equal(config.defaults.reasoningMode, 'flat');
   assert.equal(origin.reasoningMode, 'file');
 });
 
-check('load: precedence CLI > env > file > default', () => {
-  const dir = scratchDir('prec');
+check('load: path-shaped app values get ~-expanded / made absolute', () => {
+  const dir = scratchDir('apppaths');
   const file = path.join(dir, 'harness.json');
   fs.writeFileSync(
     file,
     JSON.stringify({
       version: 1,
-      sources: { tavilyKey: 'tvly-file' },
-      defaults: { reasoningMode: 'flat' },
+      apps: { corpus: { corpusPath: '/tmp/abs' } },
     }),
   );
-  const { config, origin } = loadConfig(
+  const { config } = loadConfig(file, {}, {});
+  assert.equal(config.apps.corpus.corpusPath, '/tmp/abs'); // absolute is idempotent
+});
+
+check('load: precedence CLI > env > file > default (harness fields)', () => {
+  const dir = scratchDir('prec');
+  const file = path.join(dir, 'harness.json');
+  fs.writeFileSync(
     file,
-    { tavilyKey: 'tvly-cli', reasoningMode: 'deep' },
-    { TAVILY_API_KEY: 'tvly-env' },
+    JSON.stringify({ version: 1, defaults: { reasoningMode: 'flat' } }),
   );
-  assert.equal(config.sources.tavilyKey, 'tvly-cli');
-  assert.equal(origin.tavilyKey, 'cli');
+  const { config, origin } = loadConfig(file, { reasoningMode: 'deep' }, {});
   assert.equal(config.defaults.reasoningMode, 'deep');
   assert.equal(origin.reasoningMode, 'cli');
 });
 
-check('save: creates file, then reload returns same values', () => {
+check('save: writes app config under apps[name], then reload returns it', () => {
   const dir = scratchDir('save');
   const file = path.join(dir, 'harness.json');
-  saveConfig(
-    { sources: { tavilyKey: 'tvly-abc', corpusPath: '/tmp/x' } },
-    file,
-    {},
-  );
+  saveConfig({ apps: { web: { tavilyKey: 'tvly-abc' } } }, file, {});
   assert.equal(fs.existsSync(file), true);
   const { config } = loadConfig(file, {}, {});
-  assert.equal(config.sources.tavilyKey, 'tvly-abc');
-  assert.equal(config.sources.corpusPath, '/tmp/x');
+  assert.equal(config.apps.web.tavilyKey, 'tvly-abc');
 });
 
-check('save: env set → tavilyKey in patch is dropped', () => {
-  const dir = scratchDir('envguard');
-  const file = path.join(dir, 'harness.json');
-  const result = saveConfig(
-    { sources: { tavilyKey: 'tvly-should-be-skipped', corpusPath: '/tmp/y' } },
-    file,
-    { TAVILY_API_KEY: 'tvly-env' },
-  );
-  assert.deepEqual(result.skipped, ['sources.tavilyKey']);
-  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.equal(raw.sources.tavilyKey, undefined);
-  assert.equal(raw.sources.corpusPath, '/tmp/y');
-});
-
-check('save: merges patch with existing file (other fields preserved)', () => {
+check('save: whole-replaces one app without clobbering others', () => {
   const dir = scratchDir('merge');
   const file = path.join(dir, 'harness.json');
-  saveConfig({ sources: { tavilyKey: 'tvly-a' } }, file, {});
-  saveConfig({ sources: { corpusPath: '/tmp/z' } }, file, {});
+  saveConfig({ apps: { web: { tavilyKey: 'tvly-a' } } }, file, {});
+  saveConfig({ apps: { corpus: { corpusPath: '/tmp/z' } } }, file, {});
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.equal(raw.sources.tavilyKey, 'tvly-a');
-  assert.equal(raw.sources.corpusPath, '/tmp/z');
+  assert.equal(raw.apps.web.tavilyKey, 'tvly-a'); // unrelated app preserved
+  assert.equal(raw.apps.corpus.corpusPath, '/tmp/z');
+  // Re-saving web with an empty object whole-replaces (clears) just web.
+  saveConfig({ apps: { web: {} } }, file, {});
+  const raw2 = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual(raw2.apps.web, {});
+  assert.equal(raw2.apps.corpus.corpusPath, '/tmp/z'); // corpus untouched
 });
 
 check('save: first save in git repo appends to .gitignore', () => {
@@ -146,7 +123,7 @@ check('save: second save does not re-append to .gitignore', () => {
   execSync('git init -q', { cwd: dir });
   const file = path.join(dir, 'harness.json');
   saveConfig({ defaults: { reasoningMode: 'flat' } as never }, file, {});
-  const r2 = saveConfig({ sources: { corpusPath: '/a' } }, file, {});
+  const r2 = saveConfig({ apps: { corpus: { corpusPath: '/a' } } }, file, {});
   assert.equal(r2.gitignored, false);
   const gi = fs.readFileSync(path.join(dir, '.gitignore'), 'utf8');
   const matches = gi.match(/\bharness\.json\b/g) ?? [];
@@ -201,34 +178,23 @@ check('nCtx save round-trip', () => {
   assert.equal(config.model.nCtx, 65536);
 });
 
-check('save: empty-string source value deletes the key', () => {
+check('save: empty-string outputDir deletes the key', () => {
   const dir = scratchDir('clear');
   const file = path.join(dir, 'harness.json');
-  saveConfig(
-    { sources: { tavilyKey: 'tvly-a', corpusPath: '/tmp/c' } },
-    file,
-    {},
-  );
+  saveConfig({ sources: { outputDir: '/tmp/out' } }, file, {});
   let raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.equal(raw.sources.tavilyKey, 'tvly-a');
-  assert.equal(raw.sources.corpusPath, '/tmp/c');
+  assert.equal(raw.sources.outputDir, '/tmp/out');
 
-  // Clear corpusPath with empty string.
-  saveConfig({ sources: { corpusPath: '' } }, file, {});
+  // Clear outputDir with empty string.
+  saveConfig({ sources: { outputDir: '' } }, file, {});
   raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.equal(raw.sources.corpusPath, undefined);
-  assert.equal(raw.sources.tavilyKey, 'tvly-a'); // unrelated key preserved
-
-  // Clear tavilyKey with empty string too.
-  saveConfig({ sources: { tavilyKey: '' } }, file, {});
-  raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.equal(raw.sources.tavilyKey, undefined);
+  assert.equal(raw.sources.outputDir, undefined);
 });
 
 check('save: non-git dir → gitignored=false, no .gitignore written', () => {
   const dir = scratchDir('nogit');
   const file = path.join(dir, 'harness.json');
-  const r = saveConfig({ sources: { corpusPath: '/b' } }, file, {});
+  const r = saveConfig({ apps: { corpus: { corpusPath: '/b' } } }, file, {});
   assert.equal(r.gitignored, false);
   assert.equal(fs.existsSync(path.join(dir, '.gitignore')), false);
 });

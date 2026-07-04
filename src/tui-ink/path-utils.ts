@@ -13,7 +13,7 @@
  * shell ergonomics, so the application layer handles it at the boundary.
  *
  * Apply at the boundary between user input and persisted/live state:
- *   - composer commit handlers (set_output_dir, set_corpus_path)
+ *   - composer commit handlers (set_output_dir, set_app_config path values)
  *   - loadConfig (defensive — handles stale `~`-bearing harness.json)
  *
  * Persisted form should always be absolute; downstream consumers can

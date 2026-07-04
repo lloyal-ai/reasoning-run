@@ -14,6 +14,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
 import {
   main,
@@ -23,18 +24,25 @@ import {
   each,
   call,
 } from "effection";
-import type { Operation } from "effection";
+import type { Operation, Task } from "effection";
 import { createContext } from "@lloyal-labs/lloyal.node";
 import type { SessionContext } from "@lloyal-labs/sdk";
 import {
   initAgents,
   JsonlTraceWriter,
   RerankerCtx,
+  WindDown,
+  CancelAgent,
   extractSpineSeed,
   reconstructBranch,
   type BranchCheckpoint,
 } from "@lloyal-labs/lloyal-agents";
-import type { App, TraceEvent } from "@lloyal-labs/lloyal-agents";
+import type {
+  App,
+  TraceEvent,
+  AppFactory,
+  AppManifest,
+} from "@lloyal-labs/lloyal-agents";
 import {
   c,
   log,
@@ -48,21 +56,88 @@ import type { WorkflowEvent, Command, Config } from "./tui-ink";
 // Runtime imports ONLY from modules that don't transitively pull Ink (ESM),
 // otherwise the top-level await in yoga-wasm-web breaks the CJS loader.
 import { loadConfig, saveConfig } from "./tui-ink/config";
+import type { LoadedConfig } from "./tui-ink/config";
 import { createBus, type EventBus } from "./tui-ink/event-bus";
 import {
   createInMemoryConfigStore,
   createAppRegistry,
 } from "@lloyal-labs/rig";
 import type { PlanResult, Reranker } from "@lloyal-labs/rig";
+import type { AppRegistry, AppConfigStore } from "@lloyal-labs/lloyal-agents";
+import type { AppDescriptor } from "./tui-ink/state";
 import { createReranker } from "@lloyal-labs/rig/node";
 import { createWebApp } from "@lloyal-labs/web-app";
 import { createCorpusApp } from "@lloyal-labs/corpus-app";
+
+// The two first-party app factories this harness boots, paired with their
+// `manifest.name`. These names bind a FACTORY to its config-store key — they
+// are NOT used to route generic `set_app_config` writes (those are name-driven
+// by the command payload). When app acquisition moves to the signed channel
+// (harness.dev install), this static pairing goes away.
+const WEB_APP = "web";
+const CORPUS_APP = "corpus";
+
+/** The KNOWN app set this harness bundles: each first-party app paired with
+ *  its `manifest.name`, its zero-arg factory, and its npm package name. This is
+ *  the canonical enumeration the Settings drawer renders against — every entry
+ *  appears as a card whether or not it's currently registry-enabled, so a
+ *  bundled-but-disabled app (e.g. corpus, which can't enable without a
+ *  `corpusPath`) is still configurable. `pkg` is used to read the app's
+ *  `app.json` manifest WITHOUT enabling the factory (corpus's factory throws
+ *  without config). When app acquisition moves to the signed channel
+ *  (harness.dev install), this static table is replaced by the installed set. */
+const KNOWN_APPS: readonly {
+  name: string;
+  factory: AppFactory;
+  pkg: string;
+}[] = [
+  { name: WEB_APP, factory: createWebApp, pkg: "@lloyal-labs/web-app" },
+  { name: CORPUS_APP, factory: createCorpusApp, pkg: "@lloyal-labs/corpus-app" },
+];
+
+/** Resolve the app factory this harness boots for a given `manifest.name`.
+ *  This is the static FACTORY binding (the only two first-party apps this
+ *  build ships) — it does NOT route config writes; the write path is driven
+ *  by the command's `name`. Returns undefined for unknown names. */
+function factoryFor(name: string): AppFactory | undefined {
+  return KNOWN_APPS.find((a) => a.name === name)?.factory;
+}
+
+/** Whether the named app's factory needs stored config to enable. The web app
+ *  runs config-less (keyless search fallback); the corpus app needs a path.
+ *  Used to decide whether a cleared config keeps the app enabled. */
+function appRequiresConfig(name: string): boolean {
+  return name !== WEB_APP;
+}
+
+/** Resolve path-shaped string values in an app-config object at the UI→harness
+ *  boundary — no per-app name knowledge. A value is a path when its key ends in
+ *  "Path" or the string starts with ~ / . (mirrors config.ts's load-time
+ *  resolver so stored + in-memory forms agree). */
+function resolveConfigPaths(
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (
+      typeof value === "string" &&
+      value !== "" &&
+      (/path$/i.test(key) || /^[~/.]/.test(value))
+    ) {
+      out[key] = resolvePath(value);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
 import {
   runQuery,
   runResearchPlan,
   singleTaskPlan,
   createCoverageCache,
   CoverageCacheCtx,
+  type Effort,
 } from "./harness";
 import {
   downloadIfMissing,
@@ -197,15 +272,35 @@ if (nCtxFlag !== undefined && !/^\d+$/.test(nCtxFlag)) {
 }
 const nCtxCli = nCtxFlag !== undefined ? parseInt(nCtxFlag, 10) : undefined;
 
+/** Overlay the `--corpus <dir>` flag onto a freshly-loaded config's per-app
+ *  map (mutates + returns it). The flag (when present) seeds the corpus app's
+ *  stored `corpusPath` so a one-off `--corpus <dir>` boots the corpus app
+ *  without writing harness.json — matching the prior `corpusPath` CLI
+ *  override. The `--corpus` flag binds to the corpus app by definition of the
+ *  flag, not by config-store routing. Resolved at the boundary. */
+function applyCorpusFlag(loadedCfg: LoadedConfig): LoadedConfig {
+  if (flags.corpus) {
+    loadedCfg.config.apps = {
+      ...loadedCfg.config.apps,
+      [CORPUS_APP]: {
+        ...loadedCfg.config.apps[CORPUS_APP],
+        corpusPath: resolvePath(flags.corpus),
+      },
+    };
+  }
+  return loadedCfg;
+}
+
 // Merge: CLI flag > env > harness.json > default.
-const loaded = loadConfig(configPath, {
-  modelPath: cliModelPath,
-  reranker: flags.reranker,
-  corpusPath: flags.corpus,
-  reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-  nCtx: nCtxCli,
-  outputDir: cliOutputDir,
-});
+const loaded = applyCorpusFlag(
+  loadConfig(configPath, {
+    modelPath: cliModelPath,
+    reranker: flags.reranker,
+    reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+    nCtx: nCtxCli,
+    outputDir: cliOutputDir,
+  }),
+);
 let liveConfig: Config = loaded.config;
 let liveOrigin = loaded.origin;
 const findingsMaxChars = flags["findings-budget"]
@@ -261,6 +356,159 @@ function buildPlannerContext(apps: readonly App[]): string {
   return lines.join("\n");
 }
 
+// ── Known-AgentApps surfacing (Settings drawer) ──────────────────
+//
+// The Settings drawer renders one card per KNOWN bundled app (the KNOWN_APPS
+// table), NOT just the registry-enabled ones — so a bundled-but-disabled app
+// (corpus without a corpusPath) still shows up and can be configured (which
+// enables it). Each card joins the app's local manifest with its SIGNED
+// catalog metadata (title/iconUrl/entitlements from apps.lloyal.ai). The
+// catalog is fetched once, best-effort, and cached for the process lifetime —
+// display-only, so any failure falls back to manifest-only fields (title =
+// protocol.name, no iconUrl, entitlements = []). buildAppDescriptors() runs
+// after boot and after every registry enable/disable/config change; the result
+// is forwarded to the renderer via the `apps:state` StepEvent.
+//
+// Manifest source: for an ENABLED app we read `registry.byName(name).manifest`
+// directly. For a DISABLED app we can't construct the factory (corpus throws
+// without config), so we read the package's `app.json` from disk — the same
+// file the factory itself loads via `join(__dirname,'..','app.json')`. The
+// read uses `createRequire(import.meta.url)` so it resolves the real package
+// location in the esbuild ESM bundle, and is cached per package.
+
+const nodeRequire = createRequire(import.meta.url);
+
+// Per-package app.json cache: undefined = not yet attempted; null = attempted
+// and failed (so we don't re-stat/re-parse on every emit). On a hit we hold the
+// parsed manifest. Keyed by npm package name.
+const manifestCache = new Map<string, AppManifest | null>();
+
+/** Read a KNOWN app's `app.json` manifest from disk WITHOUT enabling it.
+ *  Resolves the package's main entry via `require.resolve(pkg)` — the `.`
+ *  export is the ONLY exported subpath, so `require.resolve(pkg + '/package.json')`
+ *  is blocked by the package's `exports` map and CANNOT be used here. The entry
+ *  resolves to `<pkgRoot>/dist/index.js`; `app.json` sits one level up at the
+ *  package root (exactly where the factory reads it via
+ *  `join(__dirname,'..','app.json')`). Best-effort + cached: any failure caches
+ *  null and returns undefined so the caller falls back to a minimal descriptor. */
+function loadKnownManifest(pkg: string): AppManifest | undefined {
+  if (manifestCache.has(pkg)) return manifestCache.get(pkg) ?? undefined;
+  try {
+    const entry = nodeRequire.resolve(pkg);
+    const appJsonPath = path.join(path.dirname(entry), "..", "app.json");
+    const manifest = JSON.parse(
+      fs.readFileSync(appJsonPath, "utf8"),
+    ) as AppManifest;
+    manifestCache.set(pkg, manifest);
+    return manifest;
+  } catch {
+    manifestCache.set(pkg, null);
+    return undefined;
+  }
+}
+
+/** Shape of the public signed catalog at apps.lloyal.ai. Catalog names are
+ *  SCOPED (`lloyal/web`); manifest names are short (`web`). We match by the
+ *  trailing path segment. Only the display metadata is read here. */
+interface CatalogEntry {
+  name: string;
+  metadata?: {
+    title?: string;
+    iconUrl?: string;
+    entitlements?: string[];
+  };
+}
+interface Catalog {
+  entries: CatalogEntry[];
+}
+
+const APPS_CATALOG_URL = "https://apps.lloyal.ai/v1/catalog.json";
+
+// Process-lifetime cache: null = never fetched; the fetch is attempted once.
+// On failure we cache an empty catalog so we don't re-hit the network on every
+// emit (descriptors then fall back to manifest-only fields).
+let catalogCache: Catalog | null = null;
+
+/** Fetch + cache the signed catalog once. Best-effort: any failure caches an
+ *  empty catalog so subsequent emits stay manifest-only without re-fetching. */
+async function getCatalog(): Promise<Catalog> {
+  if (catalogCache) return catalogCache;
+  try {
+    const res = await fetch(APPS_CATALOG_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as Partial<Catalog>;
+    catalogCache = { entries: Array.isArray(json.entries) ? json.entries : [] };
+  } catch {
+    catalogCache = { entries: [] };
+  }
+  return catalogCache;
+}
+
+/** Trailing path segment of a (possibly scoped) catalog name: `lloyal/web` → `web`. */
+function shortCatalogName(name: string): string {
+  const i = name.lastIndexOf("/");
+  return i === -1 ? name : name.slice(i + 1);
+}
+
+/** Build view-ready descriptors for every KNOWN bundled app (NOT just the
+ *  registry-enabled ones), joining each app's manifest with signed catalog
+ *  metadata. A disabled app still gets a card so the user can configure it.
+ *  `enabled` is derived from registry membership. The manifest comes from the
+ *  live registry entry when enabled, else from the package's `app.json` on
+ *  disk (no factory construction — corpus's factory throws without config).
+ *  Display-only — never throws on a catalog or manifest miss. */
+function* buildAppDescriptors(
+  registry: AppRegistry,
+  configStore: AppConfigStore,
+): Operation<AppDescriptor[]> {
+  const catalog = yield* call(() => getCatalog());
+  const byShortName = new Map<string, CatalogEntry["metadata"]>();
+  for (const entry of catalog.entries) {
+    byShortName.set(shortCatalogName(entry.name), entry.metadata);
+  }
+
+  const descriptors: AppDescriptor[] = [];
+  for (const known of KNOWN_APPS) {
+    const enabledApp = registry.byName(known.name);
+    const enabled = enabledApp !== undefined;
+    // Prefer the live manifest when enabled; otherwise read app.json off disk.
+    const manifest = enabledApp?.manifest ?? loadKnownManifest(known.pkg);
+    const meta = byShortName.get(known.name);
+    const config = (yield* configStore.get(known.name)) ?? {};
+
+    if (!manifest) {
+      // Manifest unreadable (resolve/read/parse failed) — still surface a
+      // minimal card so the app isn't invisible. No tools/schema/entitlements.
+      descriptors.push({
+        name: known.name,
+        title: meta?.title ?? known.name,
+        description: "",
+        iconUrl: meta?.iconUrl,
+        tools: [],
+        entitlements: meta?.entitlements ?? [],
+        configSchema: undefined,
+        config,
+        enabled,
+      });
+      continue;
+    }
+
+    descriptors.push({
+      name: known.name,
+      title:
+        meta?.title ?? manifest.hints?.shortName ?? manifest.protocol.name,
+      description: manifest.hints?.description ?? manifest.protocol.useWhen,
+      iconUrl: meta?.iconUrl,
+      tools: [...manifest.protocol.tools],
+      entitlements: meta?.entitlements ?? [],
+      configSchema: manifest.configSchema,
+      config,
+      enabled,
+    });
+  }
+  return descriptors;
+}
+
 // ── Clarify helpers ──────────────────────────────────────────────
 
 /** Render the planner's clarify questions as an assistant-style markdown
@@ -287,11 +535,14 @@ const errorStack = (err: unknown): string =>
 // ── Main ─────────────────────────────────────────────────────────
 
 main(function* () {
-  const useInk = isTTY && !jsonlMode;
+  // The Electron utilityProcess host sets RR_BRIDGE — the harness streams its
+  // WorkflowEvents over process.parentPort instead of mounting Ink/JSONL.
+  const bridgeMode = !!process.env.RR_BRIDGE;
+  const useInk = isTTY && !jsonlMode && !bridgeMode;
 
   // Pre-boot logs only in non-Ink mode — Ink mounts ASAP in TTY mode and
   // handles download/loading UI itself.
-  if (!useInk) {
+  if (!useInk && !bridgeMode) {
     log();
     log(`${c.bold}  Deep Research${c.reset}`);
     log();
@@ -303,12 +554,37 @@ main(function* () {
   // can push directly.
   const uiChannel: EventBus<WorkflowEvent> = createBus<WorkflowEvent>();
   const commands = createSignal<Command, void>();
+  // Graceful "Wrap up" signal — provided to the run scope via the agents WindDown
+  // context; the command loop sends it on a `wrap_up` command to drain the pool to
+  // a fast best-effort answer (distinct from `stop` = halt). One persistent signal;
+  // each run's pool subscribes fresh on it.
+  const windDown = createSignal<void, void>();
+  // Per-agent cancel signal — provided to the run scope via the agents CancelAgent
+  // context; the command loop sends `{agentId}` on a `cancel_agent` command to discard
+  // one live research agent (halt its tool + prune its KV + terminal agent:failed).
+  // One persistent signal; each run's pool subscribes fresh on it.
+  const cancelAgent = createSignal<{ agentId: number }, void>();
 
   // CLI overrides for model paths get nulled when the user picks a path via
   // /model or /reranker — otherwise the CLI flag would clobber the user's
   // explicit slash choice on the next restart iteration.
   let cliModelOverride: string | undefined = cliModelPath;
   let cliRerankerOverride: string | undefined = flags.reranker;
+
+  // Re-load harness.json with the live CLI-override state + the `--corpus`
+  // flag overlay. Used on every restart / config-write reload so the four
+  // loadConfig sites stay in one place (drops the per-app config-shaped fields
+  // that no longer live in CliOverrides).
+  const reloadLiveConfig = (): LoadedConfig =>
+    applyCorpusFlag(
+      loadConfig(configPath, {
+        modelPath: cliModelOverride,
+        reranker: cliRerankerOverride,
+        reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+        outputDir: cliOutputDir,
+        nCtx: nCtxCli,
+      }),
+    );
 
   // Compute initial download plan synchronously so it can be bootstrapped
   // alongside config:loaded. Reasoning: if we send download:plan via the bus
@@ -348,6 +624,39 @@ main(function* () {
     }
     inkInstance = mod.render(uiChannel, (cmd) => commands.send(cmd), bootstrap);
     yield* ensure(() => { inkInstance?.unmount(); });
+  } else if (bridgeMode) {
+    // Electron utilityProcess: bridge the EventBus + Command signal over the
+    // parentPort MessagePort (engine ⇄ main ⇄ renderer). Same contract as Ink:
+    // subscribe → post every WorkflowEvent; inbound 'command' → commands.send.
+    const pp = (process as unknown as {
+      parentPort: {
+        postMessage(m: unknown): void;
+        on(e: "message", cb: (ev: { data: unknown }) => void): void;
+        start?(): void;
+      };
+    }).parentPort;
+    uiChannel.subscribe((ev) => pp.postMessage({ t: "event", payload: ev }));
+    pp.on("message", (e) => {
+      const m = e.data as { t?: string; payload?: unknown };
+      if (m?.t === "command") commands.send(m.payload as Command);
+    });
+    pp.start?.();
+    // No Ink/stdin handle holds the libuv loop in bridge mode, so the suspended
+    // command loop would let Node drain and exit. Keep the process alive while
+    // it waits for commands; cleared on exit.
+    const keepAlive = setInterval(() => {}, 1 << 30);
+    process.on("exit", () => clearInterval(keepAlive));
+    // Seed bootstrap exactly like Ink's render(bootstrap) does.
+    uiChannel.send({
+      type: "config:loaded",
+      config: liveConfig,
+      origin: liveOrigin,
+      path: loaded.path,
+    });
+    if (initialPlanEntries.length > 0) {
+      uiChannel.send({ type: "download:plan", entries: initialPlanEntries });
+    }
+    pp.postMessage({ t: "ready" });
   } else {
     // Non-TTY / JSONL: drain the bus to JSONL stdout. Synchronous subscribe
     // replays any already-buffered events immediately.
@@ -470,14 +779,7 @@ main(function* () {
     // handler just persisted) and refresh Ink so the new model name shows
     // during the next load phase.
     if (iteration > 0) {
-      const reloaded = loadConfig(configPath, {
-        modelPath: cliModelOverride,
-        reranker: cliRerankerOverride,
-        corpusPath: flags.corpus,
-        reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-        outputDir: cliOutputDir,
-        nCtx: nCtxCli,
-      });
+      const reloaded = reloadLiveConfig();
       liveConfig = reloaded.config;
       liveOrigin = reloaded.origin;
       // Use config:loaded (no toast) — the save toast already fired in the
@@ -569,6 +871,15 @@ main(function* () {
             kind: lastFailedKind,
             message: errorMessage(err),
           });
+          // One-shot mode has no /model command loop to recover through —
+          // a boot error must fail loud on stderr, not park awaiting a
+          // command that can never arrive.
+          if (!useInk && !bridgeMode) {
+            process.stderr.write(
+              `Boot failed (${lastFailedKind}): ${errorMessage(err)}\n`,
+            );
+            process.exit(2);
+          }
           const cmd = yield* awaitBootRecovery();
           if (cmd.type === "quit") {
             return "quit";
@@ -588,14 +899,7 @@ main(function* () {
             rerankNameNow =
               rerankerResolvedNow.entry?.label ?? path.basename(rerankModelPathNow);
           }
-          const reloaded = loadConfig(configPath, {
-            modelPath: cliModelOverride,
-            reranker: cliRerankerOverride,
-            corpusPath: flags.corpus,
-            reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-            outputDir: cliOutputDir,
-            nCtx: nCtxCli,
-          });
+          const reloaded = reloadLiveConfig();
           liveConfig = reloaded.config;
           liveOrigin = reloaded.origin;
         }
@@ -649,14 +953,18 @@ main(function* () {
       // It also sets AppRegistryCtx, which the research pool reads to render
       // the spine and resolve per-spawn tool scope.
       yield* RerankerCtx.set(rerankerFinal);
+      // Provide the wind-down signal into the run scope; the research pool reads it
+      // via WindDown.get() and drains on send. Absent ⇒ no wind-down (it's optional).
+      yield* WindDown.set(windDown);
+      // Provide the per-agent cancel signal the same way; the pool reads it via
+      // CancelAgent.get() and discards the named agent on send. Absent ⇒ no cancel.
+      yield* CancelAgent.set(cancelAgent);
       const configStore = createInMemoryConfigStore();
-      if (liveConfig.sources.tavilyKey) {
-        yield* configStore.set("web", { tavilyKey: liveConfig.sources.tavilyKey });
-      }
-      if (liveConfig.sources.corpusPath) {
-        yield* configStore.set("corpus", {
-          corpusPath: liveConfig.sources.corpusPath,
-        });
+      // Seed the config store generically from the per-app config map — no
+      // app-name knowledge. Each app's factory reads its own entry on enable
+      // and validates against its `configSchema`.
+      for (const [name, cfg] of Object.entries(liveConfig.apps)) {
+        yield* configStore.set(name, cfg);
       }
       const registry = yield* createAppRegistry({ configStore });
 
@@ -668,10 +976,12 @@ main(function* () {
       yield* CoverageCacheCtx.set(yield* createCoverageCache());
 
       // Enable the corpus app first so installed()[0] is corpus when present
-      // (matches the old sources[0] primacy). The factory loads + tokenizes
-      // the corpus during 'loading'; a bad path surfaces a toast and leaves
-      // the app disabled rather than crashing boot.
-      if (liveConfig.sources.corpusPath) {
+      // (matches the old sources[0] primacy). It only enables when the user
+      // has stored config for it (the factory needs a corpusPath). The factory
+      // loads + tokenizes the corpus during 'loading'; a bad path surfaces a
+      // toast and leaves the app disabled rather than crashing boot.
+      const corpusBootCfg = liveConfig.apps[CORPUS_APP];
+      if (corpusBootCfg && Object.keys(corpusBootCfg).length > 0) {
         uiChannel.send({ type: "weights:label", label: "Indexing corpus…" });
         try {
           const corpusApp = yield* registry.enable(createCorpusApp);
@@ -679,7 +989,7 @@ main(function* () {
           const pd = { toc: typeof pdToc === "string" ? pdToc : undefined };
           uiChannel.send({
             type: "corpus:indexed",
-            corpusPath: liveConfig.sources.corpusPath,
+            corpusPath: String(corpusBootCfg.corpusPath ?? ""),
             fileCount: pd?.toc ? pd.toc.split("\n").filter(Boolean).length : 0,
             chunkCount: 0,
           });
@@ -702,6 +1012,18 @@ main(function* () {
         });
       }
 
+      // Surface the installed AgentApps into the renderer for the Settings
+      // drawer. Closes over registry + configStore + events; re-call after
+      // every registry enable/disable/config change so the drawer stays in
+      // sync. Display-only (best-effort catalog join), so it never blocks boot.
+      function* emitApps(): Operation<void> {
+        const apps = yield* buildAppDescriptors(registry, configStore);
+        yield* events.send({ type: "apps:state", apps });
+      }
+
+      // Emit once boot completes (web/corpus enabled).
+      yield* emitApps();
+
       uiChannel.send({ type: "weights:done" });
       uiChannel.send({ type: "ui:composer" });
 
@@ -709,6 +1031,7 @@ main(function* () {
         maxTurns: MAX_TOOL_TURNS,
         findingsMaxChars,
         reasoningMode: liveConfig.defaults.reasoningMode,
+        effort: liveConfig.defaults.effort,
       };
 
       function startRunDir(query: string, mode: "flat" | "deep"): void {
@@ -717,7 +1040,9 @@ main(function* () {
       }
 
       // ── JSONL / --query scripted path ──────────────────────────
-      if (!useInk) {
+      // Bridge mode (Electron) drives the interactive command loop below, so
+      // it skips this one-shot scripted path even though useInk is false.
+      if (!useInk && !bridgeMode) {
         if (!initialQuery) {
           process.stderr.write("Non-TTY mode requires --query.\n");
           process.exit(2);
@@ -753,6 +1078,11 @@ main(function* () {
 
       // ── Ink TTY command loop ───────────────────────────────────
 
+      // Per-query run effort, set at submit_query and read by every research
+      // path (clarify / edit / accept preserve it — effort is constant for a
+      // query's lifetime; no mid-run switching by design). Initialised to the
+      // config default for the --query boot path.
+      let currentEffort: Effort = liveConfig.defaults.effort;
       let pendingPlan: {
         plan: PlanResult;
         /** The original headline query — the planner's anchor across clarify
@@ -772,6 +1102,60 @@ main(function* () {
          *  runs against the same effective-app set the planner saw. */
         appFilter: readonly string[];
       } | null = null;
+
+      // ── Run-in-fiber (Stop escape hatch) ───────────────────────
+      // The heavy operations — runQuery (preflight recon + planner) and
+      // runResearchPlan (research + synth) — run in a CHILD fiber so the
+      // command loop below keeps polling `each(commands)` while a run is in
+      // flight. Without this the loop blocks on `yield* runResearchPlan(...)`
+      // and can't even RECEIVE a `stop` command. The active run's Task is held
+      // here; `stop` halts it (Effection halt tears down the run scope and
+      // cancels any parked tool fetch via cancellable-fetch's scope-signal).
+      // Only ONE run is active at a time (the UI gates submit/accept by phase),
+      // so a single ref suffices.
+      let runTask: Task<void> | null = null;
+
+      // Spawn a run as a child fiber and hold its Task. The body OWNS its own
+      // result-handling + event-sending (it can't return a value to the loop
+      // without re-blocking it), so each call site passes a self-contained
+      // operation. On natural completion the body clears `runTask` itself (via
+      // the `clearIfCurrent` it's handed) so a finished run leaves no stale ref
+      // for a later `stop` to halt. A run that throws is caught by the loop's
+      // try/catch around `yield* runTask` — but we DON'T await it here; instead
+      // each body wraps its own work so a failure surfaces as a `ui:error`
+      // toast + return-to-composer, exactly like the old inline path's catch.
+      function* startRun(
+        body: (clearIfCurrent: () => void) => Operation<void>,
+      ): Operation<void> {
+        // A run shouldn't start while one is active; callers halt the prior run
+        // first (new-query-while-running = halt-old-then-start-new). Guard
+        // defensively so a double-start can't orphan the previous Task.
+        if (runTask) yield* haltRun();
+        const task = yield* spawn(() =>
+          body(() => {
+            // Clear only if WE are still the current run — a `stop`/new-run may
+            // have already replaced `runTask` and halted us.
+            if (runTask === task) runTask = null;
+          }),
+        );
+        runTask = task;
+      }
+
+      // Halt the active run (if any) and clear the ref. Wrapped so a teardown
+      // error can NEVER escape into the command loop and tear down the process
+      // — halting must leave the app alive for the next query. `halt()` resolves
+      // only after the run scope's teardown (reranker leases released, parked
+      // fetches aborted) completes.
+      function* haltRun(): Operation<void> {
+        const task = runTask;
+        runTask = null;
+        if (!task) return;
+        try {
+          yield* task.halt();
+        } catch {
+          /* teardown-only error — the run is gone regardless */
+        }
+      }
 
       // Per-query App participation. Tracks which enabled apps the user
       // included in the next query. Mirrored to the UI reducer via the
@@ -848,6 +1232,43 @@ main(function* () {
         try {
           if (cmd.type === "quit") return "quit";
 
+          if (cmd.type === "stop") {
+            // Escape hatch: interrupt the in-flight run and return to the
+            // composer. If no run is active, no-op (the UI only shows Stop
+            // while a run is in flight, but a late/duplicate stop is harmless).
+            // halt() tears down the run scope — the research pool, its agent
+            // fibers, and any parked tool fetch (cancellable-fetch aborts on
+            // its scope-signal) — WITHOUT killing this command loop or the
+            // process: the app stays warm for the next query. Streamed partials
+            // (scrollback / synth.buffer / agent timelines) are preserved;
+            // ui:composer only resets the phase, never the transcript.
+            if (runTask) {
+              yield* haltRun();
+              pendingPlan = null;
+              yield* events.send({ type: "ui:composer" });
+            }
+            continue;
+          }
+
+          if (cmd.type === "wrap_up") {
+            // Graceful wind-down: signal the pool to DRAIN to a fast best-effort
+            // answer — stop spawning, reap active agents, let in-flight tools
+            // settle, fold. Unlike `stop`, we do NOT halt: the run scope stays
+            // alive and produces its answer + synth. No-op if no run is active.
+            if (runTask) windDown.send();
+            continue;
+          }
+
+          if (cmd.type === "cancel_agent") {
+            // Per-agent discard: signal the pool to halt that one agent's in-flight
+            // tool, prune its branch (reclaim KV for its siblings), and emit a terminal
+            // agent:failed(user_cancel). Unlike `wrap_up`/`stop`, the run keeps going —
+            // the other agents are untouched. No-op if no run is active or the agent
+            // already finished. Ephemeral (nothing persisted).
+            if (runTask) cancelAgent.send({ agentId: cmd.agentId });
+            continue;
+          }
+
           if (cmd.type === "set_model_path") {
             // Composer only mounts in 'composer' phase, so no agent is in
             // flight here. Persist + signal restart; structured concurrency
@@ -877,41 +1298,77 @@ main(function* () {
             continue;
           }
 
-          if (cmd.type === "set_tavily_key") {
+          if (cmd.type === "set_app_config") {
+            // Generic per-app config write — no app-name knowledge. Resolve
+            // path-shaped string values at the boundary (~ + absolute), store
+            // the WHOLE replacement in the config store, then disable+re-enable
+            // the app so its factory re-reads config; the registry validates
+            // against the app's `configSchema` on enable, so a bad value surfaces
+            // as a toast and leaves the app disabled rather than crashing.
+            const resolvedValues = resolveConfigPaths(cmd.values);
+            const isClear = Object.keys(resolvedValues).length === 0;
+
+            yield* configStore.set(cmd.name, resolvedValues);
+
+            const factory = factoryFor(cmd.name);
+            if (factory) {
+              if (registry.byName(cmd.name)) yield* registry.disable(cmd.name);
+              // Only re-enable when there's config OR the app runs config-less
+              // (web's keyless fallback). For a cleared config on an app that
+              // requires config, staying disabled is correct.
+              const needsConfig = appRequiresConfig(cmd.name);
+              if (!isClear || !needsConfig) {
+                // A mid-session config-apply is NOT a boot — it must not drive
+                // the full-screen `weights:*` loader (which flips uiPhase to
+                // 'loading', blanking the timeline/drawer, with no `ui:composer`
+                // to follow it back out — leaving the UI stuck on the boot
+                // screen). Feedback comes from the `config:updated` success
+                // toast + the `corpus:indexed` chip below; failures toast via
+                // `ui:error`. The registry.enable() indexing runs inline.
+                try {
+                  const app = yield* registry.enable(factory);
+                  // Surface an indexed-source summary when the app exposes a TOC
+                  // (capability check, not a name check) so the relevant chip
+                  // can show file counts.
+                  const pd = (
+                    app.source as { promptData?: () => { toc?: string } }
+                  ).promptData?.();
+                  if (pd?.toc !== undefined) {
+                    uiChannel.send({
+                      type: "corpus:indexed",
+                      corpusPath: String(resolvedValues.corpusPath ?? ""),
+                      fileCount: pd.toc
+                        ? pd.toc.split("\n").filter(Boolean).length
+                        : 0,
+                      chunkCount: 0,
+                    });
+                  }
+                } catch (err) {
+                  // Validation/enable failed — drop the bad config and toast.
+                  yield* configStore.clear(cmd.name);
+                  yield* events.send({
+                    type: "ui:error",
+                    message: `Cannot configure ${cmd.name}: ${errorMessage(err)}`,
+                  });
+                  continue;
+                }
+              } else {
+                yield* configStore.clear(cmd.name);
+              }
+            }
+
+            // Configuring an app implies including it in the next query.
+            participation[cmd.name] = true;
+
+            // Persist the whole-replace under apps[name] without clobbering
+            // other apps, then reload so liveConfig reflects disk.
             const saved = saveConfig(
-              { sources: { tavilyKey: cmd.key } },
+              { apps: { [cmd.name]: resolvedValues } },
               configPath,
             );
-            const reloaded = loadConfig(configPath, {
-              modelPath: cliModelOverride,
-              reranker: cliRerankerOverride,
-              corpusPath: flags.corpus,
-              reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-              outputDir: cliOutputDir,
-            });
+            const reloaded = reloadLiveConfig();
             liveConfig = reloaded.config;
             liveOrigin = reloaded.origin;
-            // Swap the web provider in place: the factory reads the key from
-            // the config store at construction (Tavily with a key, keyless
-            // without). Web stays enabled either way.
-            if (registry.byName("web")) yield* registry.disable("web");
-            if (liveConfig.sources.tavilyKey) {
-              yield* configStore.set("web", {
-                tavilyKey: liveConfig.sources.tavilyKey,
-              });
-            } else {
-              yield* configStore.clear("web");
-            }
-            try {
-              yield* registry.enable(createWebApp);
-              // Reconfigure = strong signal of intent; auto-include.
-              participation["web"] = true;
-            } catch (err) {
-              yield* events.send({
-                type: "ui:error",
-                message: `Web search disabled: ${errorMessage(err)}.`,
-              });
-            }
             yield* events.send({
               type: "config:updated",
               config: liveConfig,
@@ -920,6 +1377,8 @@ main(function* () {
               gitignored: saved.gitignored,
               skipped: saved.skipped,
             });
+            // Registry membership/config changed — refresh the Settings drawer.
+            yield* emitApps();
           } else if (cmd.type === "set_output_dir") {
             // Resolve at the boundary: ~ expansion + relative→absolute happen
             // here so the persisted form in harness.json is always absolute.
@@ -929,13 +1388,7 @@ main(function* () {
               { sources: { outputDir: resolved } },
               configPath,
             );
-            const reloaded = loadConfig(configPath, {
-              modelPath: cliModelOverride,
-              reranker: cliRerankerOverride,
-              corpusPath: flags.corpus,
-              reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-              outputDir: cliOutputDir,
-            });
+            const reloaded = reloadLiveConfig();
             liveConfig = reloaded.config;
             liveOrigin = reloaded.origin;
             yield* events.send({
@@ -946,58 +1399,14 @@ main(function* () {
               gitignored: saved.gitignored,
               skipped: saved.skipped,
             });
-          } else if (cmd.type === "set_corpus_path") {
-            const resolved = cmd.path ? resolvePath(cmd.path) : "";
-            // Re-enable the corpus app against the new path. Validate BEFORE
-            // persisting: a bad path that lands in harness.json would disable
-            // corpus on every subsequent boot. Empty path clears + disables.
-            if (registry.byName("corpus")) yield* registry.disable("corpus");
-            if (resolved) {
-              uiChannel.send({
-                type: "weights:start",
-                label: "Indexing corpus…",
-              });
-              yield* configStore.set("corpus", { corpusPath: resolved });
-              try {
-                const corpusApp = yield* registry.enable(createCorpusApp);
-                // Reconfigure = strong signal of intent; auto-include.
-                participation["corpus"] = true;
-                const pd = (
-                  corpusApp.source as { promptData?: () => { toc?: string } }
-                ).promptData?.();
-                uiChannel.send({
-                  type: "corpus:indexed",
-                  corpusPath: resolved,
-                  fileCount: pd?.toc
-                    ? pd.toc.split("\n").filter(Boolean).length
-                    : 0,
-                  chunkCount: 0,
-                });
-                uiChannel.send({ type: "weights:done" });
-              } catch (err) {
-                uiChannel.send({ type: "weights:done" });
-                yield* configStore.clear("corpus");
-                yield* events.send({
-                  type: "ui:error",
-                  message: `Cannot use ${resolved}: ${errorMessage(err)}`,
-                });
-                continue;
-              }
-            } else {
-              yield* configStore.clear("corpus");
-            }
-            // Path validated (or cleared) — persist + reload.
+          } else if (cmd.type === "set_effort") {
+            // Global effort setting → persist to harness.json, reload, echo back.
+            // Every subsequent query reads liveConfig.defaults.effort.
             const saved = saveConfig(
-              { sources: { corpusPath: resolved } },
+              { defaults: { ...liveConfig.defaults, effort: cmd.effort } },
               configPath,
             );
-            const reloaded = loadConfig(configPath, {
-              modelPath: cliModelOverride,
-              reranker: cliRerankerOverride,
-              corpusPath: flags.corpus,
-              reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-              outputDir: cliOutputDir,
-            });
+            const reloaded = reloadLiveConfig();
             liveConfig = reloaded.config;
             liveOrigin = reloaded.origin;
             yield* events.send({
@@ -1008,7 +1417,6 @@ main(function* () {
               gitignored: saved.gitignored,
               skipped: saved.skipped,
             });
-            if (resolved) yield* events.send({ type: "ui:composer" });
           } else if (cmd.type === "submit_query") {
             if (registry.enabled().length === 0) {
               yield* events.send({
@@ -1029,6 +1437,17 @@ main(function* () {
               continue;
             }
             const wallStartMs = performance.now();
+            // Effort is a global setting (Settings → Effort) — read the live
+            // config value at submit time so a change there applies next query.
+            currentEffort = liveConfig.defaults.effort;
+            // A `submit_query` while a run is already in flight = the user
+            // started over. Halt the old run first, then start the new (the
+            // safe choice — never two concurrent research pools sharing the
+            // session). Plan-edit state from the prior query is stale; drop it.
+            if (runTask) {
+              yield* haltRun();
+              pendingPlan = null;
+            }
             if (cmd.skipPlanner) {
               // START path: skip the planner entirely. The user's literal
               // query becomes a single research task. The synth gate inside
@@ -1055,57 +1474,92 @@ main(function* () {
               });
               const submissionFilter = currentAppFilter();
               startRunDir(cmd.query, cmd.mode);
-              yield* runResearchPlan(cmd.query, plan, session, {
-                ...harnessOpts,
-                reasoningMode: cmd.mode,
-                wallStartMs,
-                appFilter: submissionFilter,
+              // Run in a child fiber so `stop` can interrupt it (see startRun).
+              yield* startRun(function* (clearIfCurrent) {
+                try {
+                  yield* runResearchPlan(cmd.query, plan, session, {
+                    ...harnessOpts,
+                    reasoningMode: cmd.mode,
+                    effort: currentEffort,
+                    wallStartMs,
+                    appFilter: submissionFilter,
+                    // Ask mode: let the single agent answer directly from context (0 tools OK).
+                    isAsk: cmd.skipPlanner,
+                  });
+                  yield* events.send({ type: "ui:composer" });
+                } catch (err) {
+                  yield* events.send({
+                    type: "ui:error",
+                    message: errorMessage(err),
+                  });
+                } finally {
+                  clearIfCurrent();
+                }
               });
-              yield* events.send({ type: "ui:composer" });
               continue;
             }
             const submissionFilter = currentAppFilter();
-            const result = yield* runQuery(cmd.query, session, {
-              ...harnessOpts,
-              reasoningMode: cmd.mode,
-              context: buildPlannerContext(registry.enabled()),
-              wallStartMs,
-              appFilter: submissionFilter,
-              onStart: () => startRunDir(cmd.query, cmd.mode),
+            const queryText = cmd.query;
+            const queryMode = cmd.mode;
+            // Run the planner (preflight recon + planner agent) in a child fiber
+            // so it's interruptible too — recon can take seconds. The body owns
+            // its own result-handling (sets pendingPlan / commits the clarify
+            // turn / sends ui:plan_review) since it can't return to the loop
+            // without re-blocking it.
+            yield* startRun(function* (clearIfCurrent) {
+              try {
+                const result = yield* runQuery(queryText, session, {
+                  ...harnessOpts,
+                  reasoningMode: queryMode,
+                  effort: currentEffort,
+                  context: buildPlannerContext(registry.enabled()),
+                  wallStartMs,
+                  appFilter: submissionFilter,
+                  onStart: () => startRunDir(queryText, queryMode),
+                });
+                if (result.type === "research_plan") {
+                  pendingPlan = {
+                    plan: result.plan,
+                    query: queryText,
+                    clarifyExchanged: false,
+                    mode: queryMode,
+                    wallStartMs,
+                    appFilter: submissionFilter,
+                  };
+                  yield* events.send({ type: "ui:plan_review" });
+                } else if (result.type === "clarify") {
+                  // First-round clarify: atomic (query, formattedQs) commit
+                  // bootstraps the trunk via the cold path. Subsequent rounds
+                  // use prefillUser/prefillAssistant split-half so the user's
+                  // answer is in trunk BEFORE the next planner fork.
+                  yield* call(() =>
+                    session.commitTurn(
+                      queryText,
+                      formatClarifyAsAssistantMsg(result.plan.clarifyQuestions),
+                    ),
+                  );
+                  pendingPlan = {
+                    plan: result.plan,
+                    query: queryText,
+                    clarifyExchanged: false,
+                    mode: queryMode,
+                    wallStartMs,
+                    appFilter: submissionFilter,
+                  };
+                  // Stays in clarifying via the plan event.
+                } else {
+                  yield* events.send({ type: "ui:composer" });
+                }
+              } catch (err) {
+                pendingPlan = null;
+                yield* events.send({
+                  type: "ui:error",
+                  message: errorMessage(err),
+                });
+              } finally {
+                clearIfCurrent();
+              }
             });
-            if (result.type === "research_plan") {
-              pendingPlan = {
-                plan: result.plan,
-                query: cmd.query,
-                clarifyExchanged: false,
-                mode: cmd.mode,
-                wallStartMs,
-                appFilter: submissionFilter,
-              };
-              yield* events.send({ type: "ui:plan_review" });
-            } else if (result.type === "clarify") {
-              // First-round clarify: atomic (query, formattedQs) commit
-              // bootstraps the trunk via the cold path. Subsequent rounds
-              // use prefillUser/prefillAssistant split-half so the user's
-              // answer is in trunk BEFORE the next planner fork.
-              yield* call(() =>
-                session.commitTurn(
-                  cmd.query,
-                  formatClarifyAsAssistantMsg(result.plan.clarifyQuestions),
-                ),
-              );
-              pendingPlan = {
-                plan: result.plan,
-                query: cmd.query,
-                clarifyExchanged: false,
-                mode: cmd.mode,
-                wallStartMs,
-                appFilter: submissionFilter,
-              };
-              // Stays in clarifying via the plan event.
-            } else {
-              yield* events.send({ type: "ui:composer" });
-            }
           } else if (cmd.type === "submit_clarification" && pendingPlan) {
             // Q1.5: prefill the user's answer onto the trunk BEFORE running
             // the planner so the planner's fork inherits the answer via KV.
@@ -1122,64 +1576,93 @@ main(function* () {
             //                   findings arrive (gated by clarifyExchanged)
             //     - done     → passthrough handles its own commits
             const { query: origQuery, mode, wallStartMs, appFilter } = pendingPlan;
+            const priorPlan = pendingPlan;
             yield* call(() => session.prefillUser(cmd.answer));
-            const result = yield* runQuery(origQuery, session, {
-              ...harnessOpts,
-              reasoningMode: mode,
-              context: buildPlannerContext(registry.enabled()),
-              wallStartMs,
-              appFilter,
-              onStart: () => startRunDir(origQuery, mode),
+            yield* startRun(function* (clearIfCurrent) {
+              try {
+                const result = yield* runQuery(origQuery, session, {
+                  ...harnessOpts,
+                  reasoningMode: mode,
+                  effort: currentEffort,
+                  context: buildPlannerContext(registry.enabled()),
+                  wallStartMs,
+                  appFilter,
+                  onStart: () => startRunDir(origQuery, mode),
+                });
+                if (result.type === "research_plan") {
+                  pendingPlan = {
+                    ...priorPlan,
+                    plan: result.plan,
+                    clarifyExchanged: true,
+                  };
+                  yield* events.send({ type: "ui:plan_review" });
+                } else if (result.type === "clarify") {
+                  yield* call(() =>
+                    session.prefillAssistant(
+                      formatClarifyAsAssistantMsg(result.plan.clarifyQuestions),
+                    ),
+                  );
+                  pendingPlan = {
+                    ...priorPlan,
+                    plan: result.plan,
+                    clarifyExchanged: true,
+                  };
+                } else {
+                  pendingPlan = null;
+                  yield* events.send({ type: "ui:composer" });
+                }
+              } catch (err) {
+                pendingPlan = null;
+                yield* events.send({
+                  type: "ui:error",
+                  message: errorMessage(err),
+                });
+              } finally {
+                clearIfCurrent();
+              }
             });
-            if (result.type === "research_plan") {
-              pendingPlan = {
-                ...pendingPlan,
-                plan: result.plan,
-                clarifyExchanged: true,
-              };
-              yield* events.send({ type: "ui:plan_review" });
-            } else if (result.type === "clarify") {
-              yield* call(() =>
-                session.prefillAssistant(
-                  formatClarifyAsAssistantMsg(result.plan.clarifyQuestions),
-                ),
-              );
-              pendingPlan = {
-                ...pendingPlan,
-                plan: result.plan,
-                clarifyExchanged: true,
-              };
-            } else {
-              pendingPlan = null;
-              yield* events.send({ type: "ui:composer" });
-            }
           } else if (cmd.type === "change_mode" && pendingPlan) {
-            const result = yield* runQuery(pendingPlan.query, session, {
-              ...harnessOpts,
-              reasoningMode: cmd.mode,
-              context: buildPlannerContext(registry.enabled()),
-              wallStartMs: pendingPlan.wallStartMs,
-              appFilter: pendingPlan.appFilter,
-              onStart: () => startRunDir(pendingPlan!.query, cmd.mode),
+            const priorPlan = pendingPlan;
+            const nextMode = cmd.mode;
+            yield* startRun(function* (clearIfCurrent) {
+              try {
+                const result = yield* runQuery(priorPlan.query, session, {
+                  ...harnessOpts,
+                  reasoningMode: nextMode,
+                  effort: currentEffort,
+                  context: buildPlannerContext(registry.enabled()),
+                  wallStartMs: priorPlan.wallStartMs,
+                  appFilter: priorPlan.appFilter,
+                  onStart: () => startRunDir(priorPlan.query, nextMode),
+                });
+                if (result.type === "research_plan") {
+                  pendingPlan = { ...priorPlan, plan: result.plan, mode: nextMode };
+                  yield* events.send({ type: "ui:plan_review" });
+                } else if (result.type === "clarify") {
+                  // change_mode is a non-conversational re-plan: the user toggled
+                  // mode without saying anything new. We DO NOT commit the new
+                  // clarify Qs to trunk — the trunk's last assistant turn stays
+                  // the prior round's Qs. The UI shows the new Qs from pendingPlan,
+                  // and the user's eventual answer (via submit_clarification) will
+                  // prefill onto trunk then. Documented edge: planner #N+1 forks
+                  // a trunk that holds clarify_Qs_{prior} in KV while the user
+                  // answered clarify_Qs_{change_mode_round}; we accept this minor
+                  // KV/UI mismatch rather than forge a synthetic user turn.
+                  pendingPlan = { ...priorPlan, plan: result.plan, mode: nextMode };
+                } else {
+                  pendingPlan = null;
+                  yield* events.send({ type: "ui:composer" });
+                }
+              } catch (err) {
+                pendingPlan = null;
+                yield* events.send({
+                  type: "ui:error",
+                  message: errorMessage(err),
+                });
+              } finally {
+                clearIfCurrent();
+              }
             });
-            if (result.type === "research_plan") {
-              pendingPlan = { ...pendingPlan, plan: result.plan, mode: cmd.mode };
-              yield* events.send({ type: "ui:plan_review" });
-            } else if (result.type === "clarify") {
-              // change_mode is a non-conversational re-plan: the user toggled
-              // mode without saying anything new. We DO NOT commit the new
-              // clarify Qs to trunk — the trunk's last assistant turn stays
-              // the prior round's Qs. The UI shows the new Qs from pendingPlan,
-              // and the user's eventual answer (via submit_clarification) will
-              // prefill onto trunk then. Documented edge: planner #N+1 forks
-              // a trunk that holds clarify_Qs_{prior} in KV while the user
-              // answered clarify_Qs_{change_mode_round}; we accept this minor
-              // KV/UI mismatch rather than forge a synthetic user turn.
-              pendingPlan = { ...pendingPlan, plan: result.plan, mode: cmd.mode };
-            } else {
-              pendingPlan = null;
-              yield* events.send({ type: "ui:composer" });
-            }
           } else if (cmd.type === "accept_plan" && pendingPlan) {
             if (pendingPlan.plan.intent === "clarify") {
               pendingPlan = null;
@@ -1195,24 +1678,41 @@ main(function* () {
               continue;
             }
             startRunDir(pendingPlan.query, pendingPlan.mode);
-            yield* runResearchPlan(
-              pendingPlan.query,
-              pendingPlan.plan,
-              session,
-              {
-                ...harnessOpts,
-                reasoningMode: pendingPlan.mode,
-                wallStartMs: pendingPlan.wallStartMs,
-                appFilter: pendingPlan.appFilter,
-                // Q1.5: if a clarify round prefilled the user's answer onto
-                // trunk, runResearchPlan closes the dangling pair via
-                // prefillAssistant. Otherwise (no clarify), it bootstraps the
-                // pair via commitTurn(query, answer).
-                userSidePending: pendingPlan.clarifyExchanged,
-              },
-            );
+            // Snapshot the plan; the loop clears `pendingPlan` immediately so a
+            // stray plan-edit command during the run can't mutate the running
+            // plan. The heavy research+synth runs in a child fiber so `stop`
+            // can halt it (the primary thing Stop interrupts).
+            const acceptedPlan = pendingPlan;
             pendingPlan = null;
-            yield* events.send({ type: "ui:composer" });
+            yield* startRun(function* (clearIfCurrent) {
+              try {
+                yield* runResearchPlan(
+                  acceptedPlan.query,
+                  acceptedPlan.plan,
+                  session,
+                  {
+                    ...harnessOpts,
+                    reasoningMode: acceptedPlan.mode,
+                    effort: currentEffort,
+                    wallStartMs: acceptedPlan.wallStartMs,
+                    appFilter: acceptedPlan.appFilter,
+                    // Q1.5: if a clarify round prefilled the user's answer onto
+                    // trunk, runResearchPlan closes the dangling pair via
+                    // prefillAssistant. Otherwise (no clarify), it bootstraps
+                    // the pair via commitTurn(query, answer).
+                    userSidePending: acceptedPlan.clarifyExchanged,
+                  },
+                );
+                yield* events.send({ type: "ui:composer" });
+              } catch (err) {
+                yield* events.send({
+                  type: "ui:error",
+                  message: errorMessage(err),
+                });
+              } finally {
+                clearIfCurrent();
+              }
+            });
           } else if (cmd.type === "cancel_plan") {
             pendingPlan = null;
             yield* events.send({ type: "ui:composer" });

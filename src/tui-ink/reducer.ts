@@ -9,32 +9,26 @@
  * returns the view-ready state.
  */
 
-import type { AppState, AgentRuntime, TimelineItem } from './state';
+import type { AppState, AgentRuntime, TimelineItem, SourceMeta } from './state';
 import { initialState } from './state';
 import type { WorkflowEvent } from './events';
 import type { Config } from './config';
 import { shortPath } from './path-utils';
 
-/** Seed/refresh `participation` from current config. reasoning.run today
- *  hardcodes two source apps: `web` (always enabled with a keyless
- *  fallback) and `corpus` (enabled iff a path is set). Configuring (or
- *  reconfiguring) an app sets its participation to `true` — config
- *  change is a strong signal of intent. Clearing the corpus path drops
- *  the entry so the chip falls back to the unconfigured visual.
- *
- *  Output is not a source — it's a sink — so it's not seeded here. */
+/** Seed/refresh `participation` from current config. The reducer holds NO
+ *  per-app knowledge: apps default to included via the `!== false`
+ *  convention (any app absent from the map renders as included), so there's
+ *  nothing to seed here on a plain config load. The included-by-default set
+ *  is the registry-enabled apps surfaced via `apps:state`; per-app intent is
+ *  driven explicitly through `participation:toggled` (chip toggle) and
+ *  `set_app_config` (configuring → main.ts sets the bit + re-emits state).
+ *  Returns `prev` unchanged — kept as a function so config events have a
+ *  single, named place to hook future participation policy. */
 function seedParticipation(
   prev: Record<string, boolean>,
-  cfg: Config,
+  _cfg: Config,
 ): Record<string, boolean> {
-  const next = { ...prev };
-  next.web = true;
-  if (cfg.sources.corpusPath) {
-    next.corpus = true;
-  } else {
-    delete next.corpus;
-  }
-  return next;
+  return prev;
 }
 
 const THINK_CLOSE = '</think>';
@@ -73,65 +67,152 @@ function formatArgSummary(tool: string, rawArgs: string): string {
   return q ? `"${q.length > 48 ? q.slice(0, 48) + '…' : q}"` : '';
 }
 
-/** Best-effort per-tool summary used by the column's ToolResult line. */
+/** Best-effort per-tool summary used by the column's ToolResult line. The
+ *  `sources` field carries per-page citation metadata for the Sources ledger —
+ *  extracted consumer-side from the tool's free-form result (the App Protocol
+ *  prescribes no result schema). web_search/fetch_page already return
+ *  url+title+snippet; image/icon (og:image + favicon) populate once the web app
+ *  ≥1.2.0 emits them. */
 function summarizeResult(tool: string, raw: string): {
   summary: string;
   hosts: string[];
   resultCount: number | null;
   preview: string | null;
+  sources?: SourceMeta[];
 } {
   // Try JSON parse first — structured tools (web_search, search, grep, plan).
   try {
     const parsed: unknown = JSON.parse(raw);
     if (tool === 'web_search' && Array.isArray(parsed)) {
-      const items = parsed as { url?: string; title?: string }[];
+      const items = parsed as {
+        url?: string;
+        title?: string;
+        snippet?: string;
+        image?: string;
+        icon?: string;
+      }[];
       const hosts = Array.from(
         new Set(items.map((i) => (i.url ? hostOf(i.url) : '')).filter(Boolean)),
       ).slice(0, 3);
+      // Per-page citations (url+title+snippet are already returned; image/icon
+      // arrive with web ≥1.2.0). Cap to keep the envelope small.
+      const sources: SourceMeta[] = items
+        .filter((i) => i.url || i.title)
+        .slice(0, 8)
+        .map((i) => ({
+          url: i.url,
+          title: i.title,
+          snippet: i.snippet,
+          image: i.image,
+          icon: i.icon,
+          host: i.url ? hostOf(i.url) : undefined,
+        }));
       return {
         summary: `${items.length} results`,
         hosts,
         resultCount: items.length,
         preview: items[0]?.title ?? null,
+        sources: sources.length ? sources : undefined,
       };
     }
-    if (tool === 'search' && Array.isArray(parsed)) {
-      const items = parsed as { heading?: string }[];
+    // Corpus semantic search → { hits: [{ file, heading, score }], … }. Each hit
+    // is a local source (a file/section); emit per-hit metadata into `sources`
+    // so the ledger surfaces corpus sources exactly like web pages. The ledger
+    // is App-Protocol-agnostic — it keys off `sources[]`, not the app/tool name.
+    if (
+      tool === 'search' &&
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      Array.isArray((parsed as { hits?: unknown }).hits)
+    ) {
+      const hits = (parsed as { hits: { file?: string; heading?: string }[] }).hits;
+      const sources: SourceMeta[] = hits
+        .slice(0, 8)
+        .map((h) => ({ title: h.heading || h.file, host: h.file }))
+        .filter((s) => s.title || s.host);
       return {
-        summary: `${items.length} results`,
+        summary: `${hits.length} results`,
         hosts: [],
-        resultCount: items.length,
-        preview: items[0]?.heading ?? null,
+        resultCount: hits.length,
+        preview: hits[0]?.heading ?? hits[0]?.file ?? null,
+        sources: sources.length ? sources : undefined,
       };
     }
+    // Corpus grep → { totalMatches, matches: [{ file, line, text }] }. One local
+    // source per matching file, the matched line as the snippet.
     if (tool === 'grep' && typeof parsed === 'object' && parsed !== null) {
-      const r = parsed as { totalMatches?: number; matchingLines?: number };
+      const r = parsed as {
+        totalMatches?: number;
+        matches?: { file?: string; line?: number; text?: string }[];
+      };
+      const matches = r.matches ?? [];
+      const sources: SourceMeta[] = matches
+        .slice(0, 8)
+        .map((m) => ({
+          title: m.file,
+          host: m.line != null ? `line ${m.line}` : undefined,
+          snippet: m.text,
+        }))
+        .filter((s) => s.title);
       return {
         summary: `${r.totalMatches ?? 0} matches`,
         hosts: [],
         resultCount: r.totalMatches ?? null,
-        preview: null,
+        preview: matches[0]?.file ?? null,
+        sources: sources.length ? sources : undefined,
       };
     }
-    if (tool === 'fetch_page' && typeof parsed === 'object' && parsed !== null) {
-      const r = parsed as { url?: string; title?: string; error?: string };
+    // Corpus read_file → { file, content, lines } (or { file, note }). The agent
+    // opened this file: one local source, marked via the fetch-tool name so the
+    // ledger tiers it as "featured" (read closely) rather than merely surveyed.
+    if (tool === 'read_file' && typeof parsed === 'object' && parsed !== null) {
+      const r = parsed as { file?: string; error?: string };
+      if (r.error) return { summary: r.error, hosts: [], resultCount: null, preview: null };
+      const sources: SourceMeta[] = r.file ? [{ title: r.file }] : [];
+      return {
+        summary: `${raw.length}b`,
+        hosts: [],
+        resultCount: null,
+        preview: r.file ?? null,
+        sources: sources.length ? sources : undefined,
+      };
+    }
+    if (
+      (tool === 'fetch_page' || tool === 'web_fetch') &&
+      typeof parsed === 'object' &&
+      parsed !== null
+    ) {
+      const r = parsed as {
+        url?: string;
+        title?: string;
+        error?: string;
+        excerpt?: string;
+        image?: string;
+        icon?: string;
+      };
       if (r.error) return { summary: r.error, hosts: [], resultCount: null, preview: null };
       const hosts = r.url ? [hostOf(r.url)] : [];
+      // A fetched page is one rich citation: title + excerpt as the snippet,
+      // plus og:image + favicon once the web app emits them (web ≥1.2.0).
+      const sources: SourceMeta[] | undefined =
+        r.url || r.title
+          ? [
+              {
+                url: r.url,
+                title: r.title,
+                snippet: r.excerpt,
+                image: r.image,
+                icon: r.icon,
+                host: r.url ? hostOf(r.url) : undefined,
+              },
+            ]
+          : undefined;
       return {
         summary: `${raw.length}b`,
         hosts,
         resultCount: null,
         preview: r.title ?? null,
-      };
-    }
-    if (tool === 'web_fetch' && typeof parsed === 'object' && parsed !== null) {
-      const r = parsed as { url?: string; title?: string };
-      const hosts = r.url ? [hostOf(r.url)] : [];
-      return {
-        summary: `${raw.length}b`,
-        hosts,
-        resultCount: null,
-        preview: r.title ?? null,
+        sources,
       };
     }
   } catch {
@@ -173,6 +254,8 @@ function createAgent(state: AppState, id: number, patch: Partial<AgentRuntime> =
     id,
     label: `A${state.nextLabelIdx}`,
     phase: 'idle',
+    startedAt: Date.now(),
+    endedAt: null,
     tokenCount: 0,
     toolCallCount: 0,
     taskIndex: null,
@@ -182,6 +265,8 @@ function createAgent(state: AppState, id: number, patch: Partial<AgentRuntime> =
     pendingToolCallId: null,
     retry: null,
     contentBuffer: '',
+    recovering: false,
+    failReason: null,
     timeline: [],
     ...patch,
   };
@@ -256,6 +341,7 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         toast: state.toast,
         scrollback: state.scrollback,
         participation: state.participation,
+        apps: state.apps,
         query: ev.query,
         warm: ev.warm,
         phase: 'plan',
@@ -330,6 +416,11 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         uiPhase: 'research',
         phase: 'research',
         mode: ev.mode === 'flat' ? 'flat' : 'deep',
+        // Authoritative fork count — the harness derives it from plan.tasks.length
+        // BEFORE the pool spawns. Stored so "Forked N agents" is right even when
+        // the renderer's plan.tasks is empty/late (the old `?? plan.tasks.length`
+        // path rendered "Forked 0" while agents really forked).
+        researchAgentCount: ev.agentCount,
         pipelineResumedAt: Date.now(),
       };
 
@@ -471,6 +562,12 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
       };
     }
 
+    case 'apps:state':
+      // Whole-replace the installed-AgentApps snapshot. Display-only — drives
+      // the Settings drawer. Emitted on boot completion + every registry
+      // enable/disable/config change.
+      return { ...state, apps: ev.apps };
+
     case 'preflight:start': {
       // Pre-flight recon runs BEFORE the planner, so it's the first event of a
       // multi-app query. Reset to a clean run (like the `query` event does) and
@@ -492,6 +589,7 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         scrollback: state.scrollback,
         corpusStatus: state.corpusStatus,
         participation: state.participation,
+        apps: state.apps,
         query: ev.query,
         uiPhase: 'discovering',
         phase: 'recon',
@@ -734,6 +832,19 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         }));
       }
 
+      // Recovery stream (post agent:done): `recoverInline` force-extracts the
+      // report under an EAGER report grammar with no `<think>`/`</think>`.
+      // Route it into contentBuffer (→ "Writing report") instead of opening a
+      // think block, so a forced report isn't mislabeled as the agent
+      // "Thinking". Cleared on agent:return/recovered. See docs/upstream-issues.md.
+      if (acting.recovering) {
+        return replaceAgent(working, acting.id, (a) => ({
+          ...a,
+          tokenCount: ev.tokenCount,
+          contentBuffer: a.contentBuffer + ev.text,
+        }));
+      }
+
       // Re-enter thinking after tool_result / recovery / initial idle.
       if (acting.phase !== 'thinking' || acting.currentThinkId === null) {
         if (acting.phase === 'tool' || acting.phase === 'idle') {
@@ -794,6 +905,30 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         }));
       }
 
+      // Terminal `report` tool: this fires at the stop token, but the report
+      // already streamed live as a "Writing report" row (the model's report
+      // body flowed into `contentBuffer` during the content phase — see the
+      // marker extractor in Work.tsx). Pushing a generic tool_call row here
+      // would render a misleading "Reading" timeline entry; instead just
+      // advance phase/counts and clear the streamed buffer. `agent:return`
+      // finalizes the report into a structured `report` item next.
+      // Detection: the agent was mid-report stream iff its `contentBuffer`
+      // (raw post-</think> tokens, not yet cleared) already holds the report
+      // open marker. Belt-and-suspenders on the terminal tool name, which in
+      // reasoning.run's own UI is always `report`.
+      const acting = working.agents.get(ev.agentId);
+      const wasReporting =
+        ev.tool === 'report' ||
+        (acting?.contentBuffer.includes('<parameter=result>') ?? false);
+      if (wasReporting) {
+        return replaceAgent(working, ev.agentId, (a) => ({
+          ...a,
+          phase: 'tool',
+          toolCallCount: a.toolCallCount + 1,
+          contentBuffer: '',
+        }));
+      }
+
       const id = working.nextTimelineId;
       const next = replaceAgent(working, ev.agentId, (a) =>
         pushTimeline(
@@ -847,6 +982,7 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
             preview: summary.preview,
             hosts: hostsUnique,
             resultCount: summary.resultCount,
+            sources: summary.sources,
           },
         ),
       );
@@ -877,14 +1013,16 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
         return replaceAgent(working, ev.agentId, (a) => ({
           ...a,
           phase: 'done',
+          endedAt: Date.now(),
           contentBuffer: '',
+          recovering: false,
         }));
       }
 
       const id = working.nextTimelineId;
       const next = replaceAgent(working, ev.agentId, (a) =>
         pushTimeline(
-          { ...a, phase: 'done', contentBuffer: '' },
+          { ...a, phase: 'done', endedAt: Date.now(), contentBuffer: '', recovering: false },
           {
             kind: 'report',
             id,
@@ -924,24 +1062,61 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
       };
     }
 
+    case 'agent:failed': {
+      // Forced recovery FAILED (no result — e.g. KV exhausted mid-report decode →
+      // `llama_decode failed`). The agent already showed "Writing report"
+      // (agent:done set `recovering`); without this it spins forever. Mark it
+      // terminally `failed` → cross glyph + frozen timer. There is no report.
+      const agent = state.agents.get(ev.agentId);
+      if (!agent || agent.phase === 'done' || agent.phase === 'failed') return state;
+      let working = state;
+      if (agent.currentThinkId !== null) {
+        const thinkItem = agent.timeline.find((it) => it.id === agent.currentThinkId);
+        const finalBody = thinkItem && thinkItem.kind === 'think' ? thinkItem.body : '';
+        working = closeThink(working, ev.agentId, finalBody);
+      }
+      const next = replaceAgent(working, ev.agentId, (a) => ({
+        ...a,
+        phase: 'failed',
+        endedAt: Date.now(),
+        contentBuffer: '',
+        recovering: false,
+        failReason: ev.reason,
+      }));
+      // Move it out of the live tree into scrollback (like a finished agent) so
+      // Narrative stops rendering it live — but with no `report` item.
+      const finalAgent = next.agents.get(ev.agentId);
+      const isResearch = next.researchAgentIds.includes(ev.agentId);
+      const scrollback = isResearch && finalAgent
+        ? [
+            ...next.scrollback,
+            {
+              key: `agent-${ev.agentId}-${next.scrollback.length}`,
+              kind: 'agent' as const,
+              agent: finalAgent,
+            },
+          ]
+        : next.scrollback;
+      const researchAgentIds = isResearch
+        ? next.researchAgentIds.filter((id) => id !== ev.agentId)
+        : next.researchAgentIds;
+      return { ...next, scrollback, researchAgentIds };
+    }
+
     case 'agent:done': {
       // Do NOT mark the agent `done` here. In the stall-break path,
       // agent:done fires BEFORE recoverInline streams recovery tokens via
       // agent:produce → agent:recovered. Freezing to `done` would drop those
-      // tokens. Force-close any live think (recovery opens a fresh one on
-      // its first produce) and step back to `idle` so the produce handler's
-      // re-enter-thinking branch fires. Only agent:return / agent:recovered
-      // mark `done`.
+      // tokens. Force-close any live think and step back to `idle`, marking
+      // the agent `recovering` so the produce handler routes the forced
+      // report into contentBuffer (→ "Writing report") rather than a think
+      // block. Only agent:return / agent:recovered mark `done`.
       //
-      // Clear contentBuffer too: if the agent was in `content` phase when
-      // killed (mid tool-call JSON), the partial buffer never resolves to a
-      // tool_call, and ContentStream's `▸ streaming` label would keep
-      // squatting at the bottom of the column for the entire recovery
-      // duration — misleading the user into thinking the agent is still live.
-      // Recovery emits agent:produce into a fresh think block, not back into
-      // contentBuffer, so clearing it here has no downside.
+      // Clear the stale contentBuffer too: if the agent was in `content` phase
+      // when killed (mid tool-call JSON), the partial buffer never resolves to
+      // a tool_call; recovery refills it with the actual forced report.
       const agent = state.agents.get(ev.agentId);
-      if (!agent) return state;
+      if (!agent || agent.phase === 'done') return state;
       let working = state;
       if (agent.currentThinkId !== null) {
         const thinkItem = agent.timeline.find((it) => it.id === agent.currentThinkId);
@@ -951,7 +1126,11 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
       return replaceAgent(working, ev.agentId, (a) => ({
         ...a,
         phase: 'idle',
+        // Drop any partial content buffer: if the agent is being force-recovered
+        // it never closed the terminal call, so recovery prose (refilled into
+        // contentBuffer while `recovering`) drives the "Writing report" row now.
         contentBuffer: '',
+        recovering: true,
       }));
     }
 
