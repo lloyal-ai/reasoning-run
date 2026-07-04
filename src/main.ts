@@ -638,9 +638,14 @@ main(function* () {
       // Mirror the resolved config exactly: with no gpu from any rung, a
       // leftover env value (stale from a prior iteration, or a raw invalid
       // value loadConfig rejected) must not keep steering the native loader.
-      process.stderr.write(
-        `Ignoring LLOYAL_GPU=${process.env.LLOYAL_GPU} (not one of cuda|vulkan|default)\n`,
-      );
+      // Surface the drop through the bus (Ink toast / bridge / jsonl) — a
+      // raw stderr write here would interleave with Ink's renderer; plain
+      // one-shot mode has no bus printer, so it keeps the stderr line.
+      const message = `Ignoring LLOYAL_GPU=${process.env.LLOYAL_GPU} (not one of cuda|vulkan|default)`;
+      uiChannel.send({ type: "ui:error", message });
+      if (!useInk && !bridgeMode && !jsonlMode) {
+        process.stderr.write(`${message}\n`);
+      }
       delete process.env.LLOYAL_GPU;
     }
     const explicit =
