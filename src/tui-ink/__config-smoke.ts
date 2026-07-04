@@ -178,6 +178,60 @@ check('nCtx save round-trip', () => {
   assert.equal(config.model.nCtx, 65536);
 });
 
+check('gpu precedence: CLI > env(LLOYAL_GPU) > file > default(undefined)', () => {
+  const dir = scratchDir('gpu');
+  const file = path.join(dir, 'harness.json');
+
+  // No config, no env, no CLI → undefined.
+  let result = loadConfig(file, {}, {});
+  assert.equal(result.config.model.gpu, undefined);
+  assert.equal(result.origin.gpu, 'default');
+
+  // File supplies → reads file.
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ version: 1, model: { gpu: 'vulkan' } }),
+  );
+  result = loadConfig(file, {}, {});
+  assert.equal(result.config.model.gpu, 'vulkan');
+  assert.equal(result.origin.gpu, 'file');
+
+  // Env overrides file.
+  result = loadConfig(file, {}, { LLOYAL_GPU: 'cuda' });
+  assert.equal(result.config.model.gpu, 'cuda');
+  assert.equal(result.origin.gpu, 'env');
+
+  // CLI overrides env.
+  result = loadConfig(file, { gpu: 'default' }, { LLOYAL_GPU: 'cuda' });
+  assert.equal(result.config.model.gpu, 'default');
+  assert.equal(result.origin.gpu, 'cli');
+
+  // Bogus env value silently ignored (falls back to file).
+  result = loadConfig(file, {}, { LLOYAL_GPU: 'metal' });
+  assert.equal(result.config.model.gpu, 'vulkan');
+  assert.equal(result.origin.gpu, 'file');
+
+  // Bogus FILE value also ignored (hand-edited harness.json).
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ version: 1, model: { gpu: 'tpu' } }),
+  );
+  result = loadConfig(file, {}, {});
+  assert.equal(result.config.model.gpu, undefined);
+  assert.equal(result.origin.gpu, 'default');
+});
+
+check('gpu save round-trip', () => {
+  const dir = scratchDir('gpu-save');
+  const file = path.join(dir, 'harness.json');
+  saveConfig({ model: { gpu: 'cuda' } }, file, {});
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(raw.model.gpu, 'cuda');
+  const { config, origin } = loadConfig(file, {}, {});
+  assert.equal(config.model.gpu, 'cuda');
+  assert.equal(origin.gpu, 'file');
+});
+
 check('save: empty-string outputDir deletes the key', () => {
   const dir = scratchDir('clear');
   const file = path.join(dir, 'harness.json');

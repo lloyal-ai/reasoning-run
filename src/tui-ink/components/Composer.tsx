@@ -53,6 +53,7 @@ const COMMANDS: SlashCmd[] = [
   { name: 'web', desc: 'Set web search key', kind: 'value' },
   { name: 'model', desc: 'Set local LLM .gguf path', kind: 'value' },
   { name: 'reranker', desc: 'Set local reranker .gguf path', kind: 'value' },
+  { name: 'gpu', desc: 'Set GPU backend (cuda|vulkan|default)', kind: 'value' },
   { name: 'output', desc: 'Set output directory', kind: 'value' },
   { name: 'deep', desc: 'Use deep (chain) reasoning', kind: 'instant' },
   { name: 'flat', desc: 'Use flat (parallel) reasoning', kind: 'instant' },
@@ -385,6 +386,15 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
       else if (name === 'output') dispatch({ type: 'set_output_dir', path: value });
       else if (name === 'model') dispatch({ type: 'set_model_path', path: value });
       else if (name === 'reranker') dispatch({ type: 'set_reranker_path', path: value });
+      else if (name === 'gpu') {
+        // Closed value set — an unknown backend falls through to the help
+        // list (whose /gpu row names the valid values) instead of persisting.
+        if (value === 'cuda' || value === 'vulkan' || value === 'default') {
+          dispatch({ type: 'set_gpu', gpu: value });
+        } else {
+          setShowHelp(true);
+        }
+      }
       return;
     }
     // No value — open the inline editor pre-filled with the current value.
@@ -404,6 +414,10 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
     } else if (name === 'reranker') {
       setDraft(state.config?.model.reranker ?? '');
       setField('reranker');
+    } else if (name === 'gpu') {
+      // No inline editor for the closed value set — surface the help list,
+      // whose /gpu row names the valid values.
+      setShowHelp(true);
     }
   };
 

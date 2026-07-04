@@ -55,7 +55,7 @@ import {
 import type { WorkflowEvent, Command, Config } from "./tui-ink";
 // Runtime imports ONLY from modules that don't transitively pull Ink (ESM),
 // otherwise the top-level await in yoga-wasm-web breaks the CJS loader.
-import { loadConfig, saveConfig } from "./tui-ink/config";
+import { loadConfig, saveConfig, isConfigGpu } from "./tui-ink/config";
 import type { LoadedConfig } from "./tui-ink/config";
 import { createBus, type EventBus } from "./tui-ink/event-bus";
 import {
@@ -158,9 +158,12 @@ const { values: flags, positionals } = parseArgs({
   args: process.argv.slice(2),
   options: {
     query: { type: "string" },
+    model: { type: "string" },
     reranker: { type: "string" },
     corpus: { type: "string" },
     config: { type: "string" },
+    gpu: { type: "string" },
+    backend: { type: "string" },
     "findings-budget": { type: "string" },
     "reasoning-mode": { type: "string" },
     "n-ctx": { type: "string" },
@@ -184,7 +187,32 @@ if (
   process.exit(1);
 }
 
-const cliModelPath = positionals[0] || undefined;
+// GPU backend: `--gpu` with `--backend` as an alias. Validated against
+// lloyal.node's GpuVariant union. "metal" gets a dedicated message — it's
+// not a variant package; the darwin binary has Metal built in.
+const gpuFlag = flags.gpu ?? flags.backend;
+if (gpuFlag === "metal") {
+  process.stderr.write(
+    `Invalid --gpu: metal. Metal is automatic on macOS (built into the darwin binary); use --gpu only for cuda|vulkan.\n`,
+  );
+  process.exit(1);
+}
+if (!isConfigGpu(gpuFlag) && gpuFlag !== undefined) {
+  process.stderr.write(
+    `Invalid --gpu: ${gpuFlag}. Expected "cuda", "vulkan" or "default".\n`,
+  );
+  process.exit(1);
+}
+
+// Model path: `--model` flag or first positional. Both given and
+// disagreeing is ambiguous — fail rather than pick one.
+if (flags.model && positionals[0] && flags.model !== positionals[0]) {
+  process.stderr.write(
+    `Conflicting model paths: --model ${flags.model} vs positional ${positionals[0]}. Pass one.\n`,
+  );
+  process.exit(1);
+}
+const cliModelPath = flags.model ?? (positionals[0] || undefined);
 const verbose = flags.verbose;
 const cliOutputDir = flags["output-dir"];
 const configPath = flags.config ?? DEFAULT_CONFIG_PATH;
@@ -298,6 +326,7 @@ const loaded = applyCorpusFlag(
     reranker: flags.reranker,
     reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
     nCtx: nCtxCli,
+    gpu: gpuFlag,
     outputDir: cliOutputDir,
   }),
 );
@@ -570,6 +599,7 @@ main(function* () {
   // explicit slash choice on the next restart iteration.
   let cliModelOverride: string | undefined = cliModelPath;
   let cliRerankerOverride: string | undefined = flags.reranker;
+  let cliGpuOverride = gpuFlag;
 
   // Re-load harness.json with the live CLI-override state + the `--corpus`
   // flag overlay. Used on every restart / config-write reload so the four
@@ -583,8 +613,30 @@ main(function* () {
         reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
         outputDir: cliOutputDir,
         nCtx: nCtxCli,
+        gpu: cliGpuOverride,
       }),
     );
+
+  // Steer the native-binding load for BOTH the main context and the
+  // reranker: rig's createReranker exposes no loadOptions passthrough, so
+  // process.env.LLOYAL_GPU (read lazily inside lloyal.node's loadBinary at
+  // createContext time) is the one lever that reaches them both. When the
+  // backend was EXPLICITLY requested (flag or harness.json — not a bare
+  // pre-existing env var), an unavailable variant should fail loud at boot
+  // rather than silently falling back to CPU; the loader's own
+  // LLOYAL_NO_FALLBACK knob does exactly that. A user-set LLOYAL_NO_FALLBACK
+  // is never overridden.
+  const applyGpuEnv = (cfg: Pick<LoadedConfig, "config" | "origin">): void => {
+    const gpu = cfg.config.model.gpu;
+    if (!gpu) return;
+    process.env.LLOYAL_GPU = gpu;
+    if (
+      (cfg.origin.gpu === "cli" || cfg.origin.gpu === "file") &&
+      process.env.LLOYAL_NO_FALLBACK === undefined
+    ) {
+      process.env.LLOYAL_NO_FALLBACK = "1";
+    }
+  };
 
   // Compute initial download plan synchronously so it can be bootstrapped
   // alongside config:loaded. Reasoning: if we send download:plan via the bus
@@ -746,13 +798,15 @@ main(function* () {
   function* awaitBootRecovery(): Operation<
     | { type: "set_model_path"; path: string }
     | { type: "set_reranker_path"; path: string }
+    | { type: "set_gpu"; gpu: "default" | "cuda" | "vulkan" }
     | { type: "quit" }
   > {
     for (const cmd of yield* each(commands)) {
       if (
         cmd.type === "quit" ||
         cmd.type === "set_model_path" ||
-        cmd.type === "set_reranker_path"
+        cmd.type === "set_reranker_path" ||
+        cmd.type === "set_gpu"
       ) {
         yield* each.next();
         return cmd;
@@ -836,16 +890,28 @@ main(function* () {
           lastFailedKind = "reranker";
           yield* ensureFile(rerankerResolvedNow);
 
+          // Re-derive per attempt: a /gpu recovery command reloads liveConfig
+          // between attempts. The env lever must be set before EITHER
+          // createContext (loadBinary reads it lazily at call time) and is
+          // what steers the reranker below — rig has no loadOptions passthrough.
+          applyGpuEnv({ config: liveConfig, origin: liveOrigin });
+          const gpuNow = liveConfig.model.gpu;
+
           lastFailedKind = "llm";
           uiChannel.send({ type: "weights:start", label: `Loading ${modelNameNow}…` });
           ctx = yield* call(() =>
-            createContext({
-              modelPath: modelPathNow,
-              nCtx,
-              nSeqMax: 64,
-              typeK: "q4_0",
-              typeV: "q4_0",
-            }),
+            createContext(
+              {
+                modelPath: modelPathNow,
+                nCtx,
+                nSeqMax: 64,
+                typeK: "q4_0",
+                typeV: "q4_0",
+              },
+              // Explicit variant beats env inside lloyal.node; the reranker
+              // (no loadOptions passthrough in rig) rides LLOYAL_GPU set above.
+              gpuNow ? { gpuVariant: gpuNow } : undefined,
+            ),
           );
 
           lastFailedKind = "reranker";
@@ -891,6 +957,11 @@ main(function* () {
             modelPathNow = llmResolvedNow.path;
             modelNameNow =
               llmResolvedNow.entry?.label ?? path.basename(modelPathNow);
+          } else if (cmd.type === "set_gpu") {
+            // A no-fallback variant failure is the boot error /gpu exists to
+            // recover from; the next attempt re-derives env from the reload.
+            saveConfig({ model: { gpu: cmd.gpu } }, configPath);
+            cliGpuOverride = undefined;
           } else {
             saveConfig({ model: { reranker: cmd.path } }, configPath);
             cliRerankerOverride = undefined;
@@ -1282,6 +1353,15 @@ main(function* () {
           if (cmd.type === "set_reranker_path") {
             saveConfig({ model: { reranker: cmd.path } }, configPath);
             cliRerankerOverride = undefined;
+            return "restart";
+          }
+
+          if (cmd.type === "set_gpu") {
+            // Persist + restart, same shape as /model: the next iteration's
+            // boot re-derives the LLOYAL_GPU env lever from the reloaded
+            // config and re-creates ctx + reranker on the new backend.
+            saveConfig({ model: { gpu: cmd.gpu } }, configPath);
+            cliGpuOverride = undefined;
             return "restart";
           }
 
