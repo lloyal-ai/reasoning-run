@@ -189,11 +189,19 @@ if (
 
 // GPU backend: `--gpu` with `--backend` as an alias. Validated against
 // lloyal.node's GpuVariant union. "metal" gets a dedicated message — it's
-// not a variant package; the darwin binary has Metal built in.
+// not a variant package; the darwin binary has Metal built in. Both flags
+// given and disagreeing is ambiguous — fail rather than pick one (same
+// rule as --model vs the positional below).
+if (flags.gpu && flags.backend && flags.gpu !== flags.backend) {
+  process.stderr.write(
+    `Conflicting backends: --gpu ${flags.gpu} vs --backend ${flags.backend}. Pass one.\n`,
+  );
+  process.exit(1);
+}
 const gpuFlag = flags.gpu ?? flags.backend;
 if (gpuFlag === "metal") {
   process.stderr.write(
-    `Invalid --gpu: metal. Metal is automatic on macOS (built into the darwin binary); use --gpu only for cuda|vulkan.\n`,
+    `Invalid --gpu: metal. Metal is automatic on macOS (built into the darwin binary) — omit --gpu, or pass cuda|vulkan on Linux/Windows ("default" = the platform binary's built-in backend).\n`,
   );
   process.exit(1);
 }

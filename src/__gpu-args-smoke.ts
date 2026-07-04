@@ -83,6 +83,12 @@ check('--backend is an alias reaching the same validation', () => {
   assert.match(r.stderr, /Invalid --gpu: nonsense/);
 });
 
+check('--gpu + conflicting --backend exits 1', () => {
+  const r = run(['--gpu', 'cuda', '--backend', 'vulkan', '--jsonl', '--query', 'x']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /Conflicting backends/);
+});
+
 check('--model + conflicting positional exits 1', () => {
   const r = run(['--model', '/a.gguf', '/b.gguf', '--jsonl', '--query', 'x']);
   assert.equal(r.status, 1);

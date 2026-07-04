@@ -50,7 +50,7 @@ State lives in `./harness.json` (auto-created, auto-gitignored on first save):
     "path": "/path/to/llm.gguf",       // optional — local LLM (else catalog default)
     "reranker": "/path/to/rerank.gguf",// optional — local reranker (else catalog default)
     "nCtx": 32768,                     // LLM context window
-    "gpu": "cuda"                      // optional — GPU backend (cuda|vulkan); omit on macOS (Metal is automatic)
+    "gpu": "cuda"                      // optional — GPU backend (cuda|vulkan|default); omit on macOS (Metal is automatic)
   }
 }
 ```
@@ -97,7 +97,7 @@ Every query writes a self-contained bundle under `<output-dir>/<ISO-timestamp>/`
 
 - `TAVILY_API_KEY` — wins over the stored key; never persists to disk while set.
 - `LLAMA_CTX_SIZE` — context window fallback.
-- `LLOYAL_GPU` — GPU backend fallback (`cuda`|`vulkan`). A bare env var keeps the loader's warn-and-fall-back-to-CPU behavior; set `LLOYAL_NO_FALLBACK=1` to make an unavailable backend error instead. When the backend comes from `--gpu` or `harness.json`, fail-loud is the default.
+- `LLOYAL_GPU` — GPU backend fallback (`cuda`|`vulkan`|`default`). A bare env var keeps the loader's warn-and-fall-back-to-CPU behavior; set `LLOYAL_NO_FALLBACK=1` to make an unavailable backend error instead. When the backend comes from `--gpu` or `harness.json`, fail-loud is the default.
 
 ## CLI flags
 
@@ -107,7 +107,7 @@ All optional. Anything you can set in `harness.json` you can also set on the com
 |---|---|
 | `--query <q>` | Run one query non-interactively, then exit. Implied non-TTY mode. |
 | `--model <path>` | Local LLM `.gguf` (same as the first positional / `/model`). |
-| `--gpu <cuda\|vulkan>` | GPU backend (alias `--backend`; same as `/gpu`; env `LLOYAL_GPU`). Explicitly requested backends fail loud at boot if the variant can't load. On macOS, Metal is automatic — no flag needed. |
+| `--gpu <cuda\|vulkan\|default>` | GPU backend (alias `--backend`; same as `/gpu`; env `LLOYAL_GPU`). `default` = the platform binary's built-in backend — useful to clear a persisted choice. Explicitly requested backends fail loud at boot if the variant can't load. On macOS, Metal is automatic — no flag needed. |
 | `--reasoning-mode <flat\|deep>` | Override the default reasoning mode. |
 | `--n-ctx <int>` | LLM context window in tokens. |
 | `--corpus <path>` | Local file/glob source (same as `/scan`). |
