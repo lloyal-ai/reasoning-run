@@ -318,16 +318,28 @@ function applyCorpusFlag(loadedCfg: LoadedConfig): LoadedConfig {
   return loadedCfg;
 }
 
+// Snapshot the LAUNCH-time environment for config precedence. The boot
+// path later injects LLOYAL_GPU into process.env to steer the native
+// loader; resolving reloads against live process.env would feed our own
+// injection back in as the env rung — beating a fresher harness.json
+// write (/gpu) and misattributing origin. Precedence always resolves
+// against what the user actually launched with.
+const launchEnv: NodeJS.ProcessEnv = { ...process.env };
+
 // Merge: CLI flag > env > harness.json > default.
 const loaded = applyCorpusFlag(
-  loadConfig(configPath, {
-    modelPath: cliModelPath,
-    reranker: flags.reranker,
-    reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-    nCtx: nCtxCli,
-    gpu: gpuFlag,
-    outputDir: cliOutputDir,
-  }),
+  loadConfig(
+    configPath,
+    {
+      modelPath: cliModelPath,
+      reranker: flags.reranker,
+      reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+      nCtx: nCtxCli,
+      gpu: gpuFlag,
+      outputDir: cliOutputDir,
+    },
+    launchEnv,
+  ),
 );
 let liveConfig: Config = loaded.config;
 let liveOrigin = loaded.origin;
@@ -606,14 +618,20 @@ main(function* () {
   // that no longer live in CliOverrides).
   const reloadLiveConfig = (): LoadedConfig =>
     applyCorpusFlag(
-      loadConfig(configPath, {
-        modelPath: cliModelOverride,
-        reranker: cliRerankerOverride,
-        reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
-        outputDir: cliOutputDir,
-        nCtx: nCtxCli,
-        gpu: cliGpuOverride,
-      }),
+      loadConfig(
+        configPath,
+        {
+          modelPath: cliModelOverride,
+          reranker: cliRerankerOverride,
+          reasoningMode: reasoningModeFlag as "flat" | "deep" | undefined,
+          outputDir: cliOutputDir,
+          nCtx: nCtxCli,
+          gpu: cliGpuOverride,
+        },
+        // launchEnv, not process.env: applyGpuEnv injects LLOYAL_GPU below;
+        // reloads must not read our own injection back as the env rung.
+        launchEnv,
+      ),
     );
 
   // Steer the native-binding load for BOTH the main context and the
@@ -641,7 +659,9 @@ main(function* () {
       // Surface the drop through the bus (Ink toast / bridge / jsonl) — a
       // raw stderr write here would interleave with Ink's renderer; plain
       // one-shot mode has no bus printer, so it keeps the stderr line.
-      const message = `Ignoring LLOYAL_GPU=${process.env.LLOYAL_GPU} (not one of cuda|vulkan|default)`;
+      // Covers both drop causes: an invalid launch value (loadConfig
+      // rejected it) and a stale self-injection after config cleared.
+      const message = `Ignoring LLOYAL_GPU=${process.env.LLOYAL_GPU} — no valid backend configured (expected cuda|vulkan|default)`;
       uiChannel.send({ type: "ui:error", message });
       if (!useInk && !bridgeMode && !jsonlMode) {
         process.stderr.write(`${message}\n`);
