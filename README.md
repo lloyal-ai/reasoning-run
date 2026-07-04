@@ -107,7 +107,7 @@ All optional. Anything you can set in `harness.json` you can also set on the com
 |---|---|
 | `--query <q>` | Run one query non-interactively, then exit. Implied non-TTY mode. |
 | `--model <path>` | Local LLM `.gguf` (same as the first positional / `/model`). |
-| `--gpu <cuda\|vulkan\|default>` | GPU backend (alias `--backend`; same as `/gpu`; env `LLOYAL_GPU`). `default` = the platform binary's built-in backend — useful to clear a persisted choice. Explicitly requested backends fail loud at boot if the variant can't load. On macOS, Metal is automatic — no flag needed. |
+| `--gpu <cuda\|vulkan\|default>` | GPU backend (same as `/gpu`; env `LLOYAL_GPU`). `default` = the platform binary's built-in backend — useful to clear a persisted choice. Explicitly requested backends fail loud at boot if the variant can't load. On macOS, Metal is automatic — no flag needed. |
 | `--reasoning-mode <flat\|deep>` | Override the default reasoning mode. |
 | `--n-ctx <int>` | LLM context window in tokens. |
 | `--corpus <path>` | Local file/glob source (same as `/scan`). |

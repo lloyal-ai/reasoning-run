@@ -163,7 +163,6 @@ const { values: flags, positionals } = parseArgs({
     corpus: { type: "string" },
     config: { type: "string" },
     gpu: { type: "string" },
-    backend: { type: "string" },
     "findings-budget": { type: "string" },
     "reasoning-mode": { type: "string" },
     "n-ctx": { type: "string" },
@@ -187,18 +186,10 @@ if (
   process.exit(1);
 }
 
-// GPU backend: `--gpu` with `--backend` as an alias. Validated against
-// lloyal.node's GpuVariant union. "metal" gets a dedicated message — it's
-// not a variant package; the darwin binary has Metal built in. Both flags
-// given and disagreeing is ambiguous — fail rather than pick one (same
-// rule as --model vs the positional below).
-if (flags.gpu && flags.backend && flags.gpu !== flags.backend) {
-  process.stderr.write(
-    `Conflicting backends: --gpu ${flags.gpu} vs --backend ${flags.backend}. Pass one.\n`,
-  );
-  process.exit(1);
-}
-const gpuFlag = flags.gpu ?? flags.backend;
+// GPU backend, validated against lloyal.node's GpuVariant union. "metal"
+// gets a dedicated message — it's not a variant package; the darwin binary
+// has Metal built in.
+const gpuFlag = flags.gpu;
 if (gpuFlag === "metal") {
   process.stderr.write(
     `Invalid --gpu: metal. Metal is automatic on macOS (built into the darwin binary) — omit --gpu, or pass cuda|vulkan on Linux/Windows ("default" = the platform binary's built-in backend).\n`,
