@@ -32,6 +32,7 @@ main(function* () {
     modelPath: 'default',
     reranker: 'default',
     nCtx: 'default',
+    gpu: 'default',
     outputDir: 'default',
   };
 

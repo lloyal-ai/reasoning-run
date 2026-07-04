@@ -690,6 +690,7 @@ check('config:loaded seeds config without forcing a uiPhase transition', () => {
         modelPath: 'default',
         reranker: 'default',
         nCtx: 'default',
+        gpu: 'default',
         outputDir: 'default',
       },
       path: '/tmp/harness.json',
@@ -854,6 +855,7 @@ check('config:updated produces a toast; skipped fields flagged', () => {
     modelPath: 'default' as const,
     reranker: 'default' as const,
     nCtx: 'default' as const,
+    gpu: 'default' as const,
     outputDir: 'default' as const,
   };
   const s = drive([

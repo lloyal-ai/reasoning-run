@@ -40,6 +40,21 @@ export interface ConfigDefaults {
   maxTurns: number;
 }
 
+/** GPU backend variant — mirrors lloyal.node's `GpuVariant` union (config.ts
+ *  deliberately takes no lloyal.node dependency). 'default' = the platform
+ *  package's built-in backend (Metal on darwin, CPU elsewhere). */
+export type ConfigGpu = 'default' | 'cuda' | 'vulkan';
+
+export const CONFIG_GPU_VALUES: readonly ConfigGpu[] = [
+  'default',
+  'cuda',
+  'vulkan',
+];
+
+export function isConfigGpu(v: unknown): v is ConfigGpu {
+  return typeof v === 'string' && (CONFIG_GPU_VALUES as readonly string[]).includes(v);
+}
+
 export interface ConfigModel {
   /** Filesystem path OR catalog id (e.g. `qwen3.5-4b-q4`). Resolution is
    *  the caller's concern — config just stores whatever the user typed. */
@@ -47,6 +62,9 @@ export interface ConfigModel {
   reranker?: string;
   /** LLM context window size. Null/undefined falls through to CLI/env/default. */
   nCtx?: number;
+  /** GPU backend variant. Null/undefined falls through to CLI/env/default
+   *  (env source: LLOYAL_GPU). */
+  gpu?: ConfigGpu;
 }
 
 export interface Config {
@@ -68,6 +86,7 @@ export interface ConfigOrigin {
   modelPath: 'cli' | 'file' | 'default';
   reranker: 'cli' | 'file' | 'default';
   nCtx: 'cli' | 'env' | 'file' | 'default';
+  gpu: 'cli' | 'env' | 'file' | 'default';
   outputDir: 'cli' | 'file' | 'default';
 }
 
@@ -84,6 +103,7 @@ export interface CliOverrides {
   modelPath?: string;
   reranker?: string;
   nCtx?: number;
+  gpu?: ConfigGpu;
   outputDir?: string;
 }
 
@@ -172,6 +192,15 @@ export function loadConfig(
     ? parseInt(envNCtxStr, 10)
     : undefined;
 
+  // GPU backend env rung. Invalid values are ignored (fall through to
+  // file/default) rather than erroring — the env var predates this config
+  // field and lloyal.node itself tolerates unknown variants.
+  const envGpuStr = env.LLOYAL_GPU?.trim();
+  const envGpu = isConfigGpu(envGpuStr) ? envGpuStr : undefined;
+  // A stale/hand-edited harness.json could carry a bad gpu value; same
+  // ignore-don't-error treatment as the env rung.
+  const fileGpu = isConfigGpu(base.model.gpu) ? base.model.gpu : undefined;
+
   // ── Merge with precedence: CLI > env > file > default ──
   // Path-shaped fields (outputDir, modelPath) get resolved through
   // resolvePath: ~ expansion + relative→absolute. Idempotent on
@@ -185,6 +214,7 @@ export function loadConfig(
   const modelPath = rawModelPath ? resolvePath(rawModelPath) : undefined;
   const reranker = cli.reranker ?? base.model.reranker;
   const nCtx = cli.nCtx ?? envNCtx ?? base.model.nCtx;
+  const gpu = cli.gpu ?? envGpu ?? fileGpu;
 
   // Per-app config passes through verbatim, with path-shaped string values
   // resolved generically (no app-name knowledge): any property whose name
@@ -204,7 +234,7 @@ export function loadConfig(
       effort: base.defaults.effort,
       maxTurns: base.defaults.maxTurns,
     },
-    model: { path: modelPath, reranker, nCtx },
+    model: { path: modelPath, reranker, nCtx, gpu },
   };
 
   const origin: ConfigOrigin = {
@@ -220,6 +250,13 @@ export function loadConfig(
       : envNCtx !== undefined
         ? 'env'
         : fromFile?.model.nCtx !== undefined
+          ? 'file'
+          : 'default',
+    gpu: cli.gpu !== undefined
+      ? 'cli'
+      : envGpu !== undefined
+        ? 'env'
+        : fileGpu !== undefined
           ? 'file'
           : 'default',
     outputDir: cli.outputDir

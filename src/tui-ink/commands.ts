@@ -27,6 +27,10 @@ export type Command =
   | { type: 'set_effort'; effort: 'low' | 'medium' | 'high' }
   | { type: 'set_model_path'; path: string }
   | { type: 'set_reranker_path'; path: string }
+  // GPU backend variant (persisted as model.gpu; main.ts restarts the boot so
+  // ctx + reranker reload on the new backend). Values mirror lloyal.node's
+  // GpuVariant; 'default' = the platform binary's built-in backend.
+  | { type: 'set_gpu'; gpu: 'default' | 'cuda' | 'vulkan' }
   | { type: 'toggle_participation'; name: string }
   // Escape hatch: interrupt the in-flight run (planner / research / synth) and
   // return to the composer. Handled in main.ts's command loop by halting the
