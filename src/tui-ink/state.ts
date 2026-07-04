@@ -35,6 +35,22 @@ export type UiPhase =
  *  everywhere — no 'chain' alias. */
 export type Mode = 'flat' | 'deep';
 
+/** One cited source, extracted CONSUMER-side from a tool result (the App
+ *  Protocol prescribes no result schema). Web tools populate url/title/snippet
+ *  today; image (og:image) + icon (favicon) arrive once the web app ≥1.2.0
+ *  emits them. App-agnostic — corpus/other apps fill whatever subset applies. */
+export interface SourceMeta {
+  url?: string;
+  title?: string;
+  snippet?: string;
+  /** og:image URL (or a local cache ref once the engine inlines it). */
+  image?: string;
+  /** favicon URL. */
+  icon?: string;
+  /** Display host, derived from url when present. */
+  host?: string;
+}
+
 /** Per-agent chronological stream item. Column.tsx renders one component
  *  per kind. `live: true` on a think item means its body is currently
  *  streaming tokens and should render with a `▎` cursor. */
@@ -65,6 +81,14 @@ export type TimelineItem =
       preview: string | null;
       hosts: string[];
       resultCount: number | null;
+      /** Per-source citation metadata extracted from the tool's (free-form)
+       *  result — the App Protocol prescribes no result schema, so this is a
+       *  CONSUMER-side convention parsed in summarizeResult from known tool
+       *  shapes (web_search/fetch_page already return url+title+snippet;
+       *  fetch_page additionally emits og:image + favicon once web ≥1.2.0).
+       *  Drives the per-page rows in the Sources ledger. Empty/undefined for
+       *  tools that surface no per-source data (grep, corpus search). */
+      sources?: SourceMeta[];
     }
   | {
       kind: 'report';
@@ -76,9 +100,15 @@ export type TimelineItem =
 export interface AgentRuntime {
   id: number;
   label: string;                          // "A0", "A1", …
-  phase: 'idle' | 'thinking' | 'content' | 'tool' | 'done';
+  phase: 'idle' | 'thinking' | 'content' | 'tool' | 'done' | 'failed';
   tokenCount: number;
   toolCallCount: number;
+  /** Wall-clock spawn time (ms) — start of this task's elapsed timer. */
+  startedAt: number;
+  /** Wall-clock completion time (ms), set when the agent reaches `done`
+   *  (agent:return / agent:recovered). Null while running. Elapsed =
+   *  (endedAt ?? now) − startedAt. */
+  endedAt: number | null;
   /** Research task index this agent was spawned for. Null for synth. */
   taskIndex: number | null;
   /** Short task description, used in the column header when present. */
@@ -97,9 +127,26 @@ export interface AgentRuntime {
   retry: { tool: string; retryAt: number; attempt: number } | null;
   /** Live post-</think> token buffer. Tokens stream into this between
    *  closing a think block and the next agent:tool_call / agent:report
-   *  (the model is writing tool-call JSON — report body lives inside).
-   *  Cleared on tool_call / report (those fire structured items instead). */
+   *  (the model is writing tool-call JSON — the terminal `report` tool's body
+   *  lives inside that JSON, between `<parameter=result>` and `</parameter>`,
+   *  raw and unescaped). The "Writing report" row extracts the live report body
+   *  straight from this buffer (see extractStreamingReport in Work.tsx) — same
+   *  marker-delimited technique the think block uses with `</think>`. Cleared
+   *  on tool_call / report (those fire structured items instead). */
   contentBuffer: string;
+  /** True while the agent is being force-recovered: `agent:done` fired (the
+   *  agent stalled without a voluntary report) and `recoverInline` is streaming
+   *  a forced report under an EAGER report grammar (no `<think>`/`</think>`).
+   *  Routes those `agent:produce` tokens into `contentBuffer` (→ "Writing
+   *  report") instead of a think block, so a recovered report isn't mislabeled
+   *  as the agent "Thinking". Set on `agent:done`, cleared on
+   *  `agent:return`/`agent:recovered`. See docs/upstream-issues.md. */
+  recovering: boolean;
+  /** Set when the agent's forced recovery FAILED (e.g. KV exhausted mid-report
+   *  decode → `llama_decode failed`): no result was produced. Drives the terminal
+   *  failure glyph (a cross) + frozen timer instead of an eternal "Writing report"
+   *  spinner. Set on `agent:failed`; null otherwise. */
+  failReason: string | null;
   /** Per-agent chronological stream. */
   timeline: TimelineItem[];
 }
@@ -175,6 +222,42 @@ export interface Toast {
   id: number;
 }
 
+/** A signed entitlement disclosed by an app's catalog metadata. The `key`
+ *  maps to a privacy-label-style pill (network → Internet, etc.); `label`
+ *  is the human-readable name carried alongside it. */
+export interface AppEntitlement {
+  key: string;
+  label: string;
+}
+
+/** A view-ready descriptor for one installed (registry-enabled) AgentApp.
+ *  Joins the app's local manifest with its signed catalog metadata
+ *  (title/iconUrl/entitlements from apps.lloyal.ai) so the Settings drawer
+ *  can render the app card, its tools, its config schema, and its current
+ *  stored config. Built engine-side by main.ts and forwarded via the
+ *  `apps:state` event; the reducer drops it whole into `AppState.apps`. */
+export interface AppDescriptor {
+  /** manifest.name (e.g. "web") — routing key + config-store key. */
+  name: string;
+  /** catalog metadata.title ?? manifest.hints?.shortName ?? protocol.name */
+  title: string;
+  /** manifest.hints?.description ?? protocol.useWhen */
+  description: string;
+  /** catalog metadata.iconUrl (apps.lloyal.ai asset) — else undefined → glyph. */
+  iconUrl?: string;
+  /** manifest.protocol.tools — the protocol's tool-name list. */
+  tools: string[];
+  /** catalog metadata.entitlements — capability keys
+   *  (network|data-egress|local-files|credentials). */
+  entitlements: string[];
+  /** manifest.configSchema (JSON Schema) — fields render read-only this increment. */
+  configSchema?: unknown;
+  /** Current stored config from configStore.get(name). */
+  config: Record<string, unknown>;
+  /** Registry participation/enabled state. */
+  enabled: boolean;
+}
+
 export interface AppState {
   query: string;
   warm: boolean;
@@ -223,6 +306,10 @@ export interface AppState {
   pendingTaskDescription: string | null;
   /** Count of research-phase spawns seen (flat mode uses this to assign taskIndex). */
   researchSpawnCount: number;
+  /** Authoritative fork count from `research:start` (= plan.tasks.length at the
+   *  harness). The "Forked N agents" label prefers this over the live agent set
+   *  or plan.tasks, which can be empty/late on the renderer side. 0 until research starts. */
+  researchAgentCount: number;
   /** Merged config from CLI > env > file > default. Null until config:loaded. */
   config: Config | null;
   /** Per-field origin — used to flag secrets as `(env)` in the composer. */
@@ -264,9 +351,14 @@ export interface AppState {
    *  for this session); missing key = treat as included by default. The
    *  filter is applied at submit time in main.ts; `runQuery`'s
    *  `appFilter` opt carries the included-names array. Reset to `true`
-   *  on reconfigure (`set_corpus_path`/`set_tavily_key`) — a config
+   *  on reconfigure (`set_app_config`) — a config
    *  change is a strong signal of intent to use the app. */
   participation: Record<string, boolean>;
+  /** Installed AgentApps surfaced into the renderer — one descriptor per
+   *  registry-enabled app, joined with its signed catalog metadata. Drives
+   *  the Settings drawer. Re-emitted whole on boot completion and after
+   *  every registry enable/disable/config change. */
+  apps: AppDescriptor[];
 }
 
 export const initialState: AppState = {
@@ -292,6 +384,7 @@ export const initialState: AppState = {
   pendingTaskIndex: null,
   pendingTaskDescription: null,
   researchSpawnCount: 0,
+  researchAgentCount: 0,
   config: null,
   configOrigin: null,
   toast: null,
@@ -304,4 +397,5 @@ export const initialState: AppState = {
   corpusStatus: null,
   bootError: null,
   participation: {},
+  apps: [],
 };

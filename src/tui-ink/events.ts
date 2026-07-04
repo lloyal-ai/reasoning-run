@@ -9,7 +9,7 @@
 
 import type { AgentEvent } from '@lloyal-labs/lloyal-agents';
 import type { PlanIntent, ResearchTask } from '@lloyal-labs/rig';
-import type { OpTiming } from './state';
+import type { AppDescriptor, OpTiming } from './state';
 import type { Config, ConfigOrigin } from './config';
 
 export type StepEvent =
@@ -98,6 +98,12 @@ export type StepEvent =
   // the bit in `state.participation[name]`. Pure UI state — no harness
   // side effects; main.ts derives `appFilter` from `state.participation`
   // at submit time and threads it into runQuery / runResearchPlan.
-  | { type: 'participation:toggled'; name: string };
+  | { type: 'participation:toggled'; name: string }
+  // Installed-AgentApps snapshot for the Settings drawer. Emitted by main.ts
+  // after boot completes AND after every registry enable/disable/config
+  // change. The reducer drops it whole into `state.apps`. Display-only — the
+  // catalog-metadata join (title/iconUrl/entitlements) is best-effort and
+  // falls back to manifest-only fields on any catalog fetch failure.
+  | { type: 'apps:state'; apps: AppDescriptor[] };
 
 export type WorkflowEvent = AgentEvent | StepEvent;
