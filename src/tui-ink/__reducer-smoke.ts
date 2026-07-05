@@ -7,7 +7,7 @@
 
 import assert from 'node:assert';
 import { reduce } from './reducer';
-import { initialState } from './state';
+import { initialState, extractStreamingReport } from './state';
 import type { WorkflowEvent } from './events';
 
 function drive(events: WorkflowEvent[]) {
@@ -1068,6 +1068,24 @@ check('stop → ui:composer returns to composer, RETAINS scrollback + synth buff
   assert.equal(after.synth.buffer, synthBufBefore, 'stop must NOT clear the synth buffer');
   assert.equal(after.agents.size, agentsBefore, 'stop must NOT clear agent timelines');
   assert.equal(after.query, 'q', 'prior query text survives for follow-up context');
+});
+
+check('extractStreamingReport: marker-gated report body from Hermes buffer', () => {
+  // No open marker yet → null (keeps non-terminal tool args off-screen).
+  assert.equal(extractStreamingReport('<tool_call>\n<function=web_search>\n<parameter=query>voice latency'), null);
+  assert.equal(extractStreamingReport(''), null);
+  // Open marker arrived → body streams from there (leading newline dropped).
+  assert.equal(
+    extractStreamingReport('<tool_call>\n<function=report>\n<parameter=result>\n## Findings\nStreaming body'),
+    '## Findings\nStreaming body',
+  );
+  // Close marker arrived → body truncates at it.
+  assert.equal(
+    extractStreamingReport('junk<parameter=result>\nDone body\n</parameter>\n</function>'),
+    'Done body\n',
+  );
+  // The recovering branch (raw buffer, no envelope) is caller-side — the
+  // renderer bypasses extraction entirely when agent.recovering is true.
 });
 
 process.stdout.write('---\n');

@@ -41,11 +41,18 @@ export function App({ bus, dispatch, bootstrap }: AppProps): React.ReactElement 
     state.uiPhase !== 'clarifying';  // components below render their own header
 
   const showResults = state.uiPhase === 'research' || state.uiPhase === 'done';
+  // The composer dock persists through the running phases: its input row
+  // becomes the run status line and the PLAN/START pill morphs into the
+  // run controls (WRAP UP / STOP). research → done keeps it mounted, so
+  // the pill morphs back for the follow-up with no unmount flash.
   const showComposer =
     state.uiPhase === 'composer' ||
     state.uiPhase === 'done' ||
     state.uiPhase === 'clarifying' ||
-    state.uiPhase === 'boot_error';
+    state.uiPhase === 'boot_error' ||
+    state.uiPhase === 'discovering' ||
+    state.uiPhase === 'planning' ||
+    state.uiPhase === 'research';
 
   return (
     <CommandContext.Provider value={dispatch}>

@@ -38,11 +38,19 @@ export function FrozenAgentPanel({ agent }: FrozenAgentPanelProps): React.ReactE
       paddingX={1}
       marginBottom={1}
     >
-      {/* Header */}
+      {/* Header — the frozen panel is the terminal feedback for a failed or
+        user-cancelled agent (the reducer removes it from the live row the
+        moment agent:failed lands), so the glyph must say what happened. */}
       <Box flexShrink={0}>
         <Text color={color} bold>{agent.label}</Text>
         <Box flexGrow={1} />
-        <Text color="green">✓</Text>
+        {agent.phase === 'failed' ? (
+          <Text color="red">
+            ✕ {agent.failReason === 'user_cancel' ? 'cancelled' : 'failed'}
+          </Text>
+        ) : (
+          <Text color="green">✓</Text>
+        )}
       </Box>
       {descText ? <Text dimColor>{descText}</Text> : null}
       {agent.dependencyHint ? (

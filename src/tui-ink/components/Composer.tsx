@@ -31,10 +31,11 @@
 
 import React, { memo, useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
-import type { AppState } from '../state';
+import type { AppState, UiPhase } from '../state';
 import { useCommand } from '../hooks/useCommand';
 import { TextInput } from './TextInput';
 import { shortPath } from '../path-utils';
+import { SPINNER_FRAMES, SPINNER_TICK_MS } from '../spinner-frames';
 
 type Field = 'query' | 'web' | 'scan' | 'output' | 'model' | 'reranker';
 
@@ -188,6 +189,112 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
   const inSlash = parsedSlash !== null;
   const matches = filterCommands(parsedSlash);
 
+  // ── Run mode ──────────────────────────────────────────────────
+  // While a run is active the composer stays mounted but morphs: the input
+  // row becomes a status line, the PLAN/START pill becomes WRAP UP / STOP,
+  // and a run keymap takes over (the query/chip handlers deactivate).
+  const running =
+    state.uiPhase === 'discovering' ||
+    state.uiPhase === 'planning' ||
+    state.uiPhase === 'research';
+  const inResearch = state.uiPhase === 'research';
+  // Which run pill Enter fires. Esc jumps focus here to STOP — the "armed"
+  // state for the destructive action is visible focus, not a hidden timer.
+  const [runFocus, setRunFocus] = useState<'wrap_up' | 'stop'>('wrap_up');
+  // Set locally when wrap_up is dispatched. There is deliberately no
+  // reducer-level wind-down state: the engine drains via the WindDown
+  // signal and the reducer only sees agents flipping to `recovering`.
+  const [windingDown, setWindingDown] = useState(false);
+  useEffect(() => {
+    if (!running) {
+      setRunFocus('wrap_up');
+      setWindingDown(false);
+    }
+  }, [running]);
+
+  // Ref-mirror for the run keymap (same stale-closure workaround as the
+  // chip handler below / PlanReview.tsx).
+  const runStateRef = useRef({
+    inResearch,
+    runFocus,
+    windingDown,
+    mode: state.mode,
+    agents: state.agents,
+    researchAgentIds: state.researchAgentIds,
+  });
+  runStateRef.current = {
+    inResearch,
+    runFocus,
+    windingDown,
+    mode: state.mode,
+    agents: state.agents,
+    researchAgentIds: state.researchAgentIds,
+  };
+
+  useInput(
+    (input, key) => {
+      const s = runStateRef.current;
+      if (key.ctrl && input === 'c') {
+        dispatch({ type: 'quit' });
+        return;
+      }
+      if (key.escape) {
+        // Outside research there is no wrap/stop choice (desktop mirror:
+        // the popover only exists in research) — Esc stops directly.
+        if (!s.inResearch || s.runFocus === 'stop') {
+          dispatch({ type: 'stop' });
+          return;
+        }
+        setRunFocus('stop');
+        return;
+      }
+      if (key.return) {
+        if (s.inResearch && s.runFocus === 'wrap_up') {
+          // Repeat sends are harmless — windDown is a signal, not a toggle.
+          dispatch({ type: 'wrap_up' });
+          setWindingDown(true);
+          return;
+        }
+        dispatch({ type: 'stop' });
+        return;
+      }
+      if (key.tab) {
+        if (s.inResearch) {
+          setRunFocus((f) => (f === 'wrap_up' ? 'stop' : 'wrap_up'));
+        }
+        return;
+      }
+      if (input === 'w' && s.inResearch) {
+        dispatch({ type: 'wrap_up' });
+        setWindingDown(true);
+        return;
+      }
+      // Digits cancel one live flat-mode agent by its card badge — the
+      // digit is taskIndex + 1 (stable across the run; researchAgentIds
+      // reindexes as agents finish, task numbers don't). Offer-condition
+      // mirrors the desktop card (cards.tsx): not terminal, not
+      // recovering, flat mode, and >1 agent live (never cancel into an
+      // empty synth). Ineligible presses fail silently — ui:error is NOT
+      // usable here (its reducer case force-returns to the composer
+      // phase).
+      if (s.inResearch && input >= '1' && input <= '9') {
+        if (s.mode !== 'flat' || s.researchAgentIds.length <= 1) return;
+        const digit = Number(input);
+        const id = s.researchAgentIds.find(
+          (aid) => s.agents.get(aid)?.taskIndex === digit - 1,
+        );
+        if (id === undefined) return;
+        const agent = s.agents.get(id);
+        if (!agent || agent.phase === 'done' || agent.phase === 'failed' || agent.recovering) {
+          return;
+        }
+        dispatch({ type: 'cancel_agent', agentId: id });
+        return;
+      }
+    },
+    { isActive: running },
+  );
+
   // Query field input handling: Tab + Esc + Ctrl-C. TextInput owns
   // character entry. Tab autocompletes the slash command when in slash
   // mode; otherwise toggles reasoning mode (existing behavior).
@@ -239,7 +346,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         return;
       }
     },
-    { isActive: field === 'query' && chipFocus === null },
+    { isActive: field === 'query' && chipFocus === null && !running },
   );
 
   // Chip-focus input handling: active when a source/setting chip is the
@@ -328,7 +435,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         }
       }
     },
-    { isActive: chipFocus !== null && field === 'query' },
+    { isActive: chipFocus !== null && field === 'query' && !running },
   );
 
   const submitQuery = (q: string): void => {
@@ -464,8 +571,14 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
-      {/* Main row: query input or inline editor */}
-      {field === 'query' ? (
+      {/* Main row: run status line, query input, or inline editor */}
+      {running ? (
+        <RunStatusLine
+          uiPhase={state.uiPhase}
+          liveCount={state.researchAgentIds.length}
+          windingDown={windingDown}
+        />
+      ) : field === 'query' ? (
         <Box>
           <Text>› </Text>
           <TextInput
@@ -619,18 +732,40 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
           focused={chipFocus === 'output'}
         />
         <Box flexGrow={1} />
-        {field === 'query' && !clarifying && !inSlash && chipFocus === null ? (
+        {running ? (
+          <RunButtons
+            inResearch={inResearch}
+            runFocus={runFocus}
+            windingDown={windingDown}
+          />
+        ) : field === 'query' && !clarifying && !inSlash && chipFocus === null ? (
           <SubmitButtons submitMode={submitMode} />
         ) : null}
       </Box>
       <Box marginTop={0}>
-        <HintRow
-          field={field}
-          hasSource={hasSource}
-          inSlash={inSlash}
-          clarifying={clarifying}
-          chipFocus={chipFocus}
-        />
+        {running ? (
+          <RunHintRow
+            inResearch={inResearch}
+            runFocus={runFocus}
+            windingDown={windingDown}
+            cancelDigits={
+              state.mode === 'flat' && state.researchAgentIds.length > 1
+                ? state.researchAgentIds
+                    .map((id) => state.agents.get(id)?.taskIndex)
+                    .filter((t): t is number => t != null)
+                    .map((t) => t + 1)
+                : []
+            }
+          />
+        ) : (
+          <HintRow
+            field={field}
+            hasSource={hasSource}
+            inSlash={inSlash}
+            clarifying={clarifying}
+            chipFocus={chipFocus}
+          />
+        )}
       </Box>
 
       {/* Toast (transient) */}
@@ -787,7 +922,7 @@ const SubmitButton = memo(function SubmitButton({
 }: {
   label: string;
   focused: boolean;
-  hue: 'cyan' | 'green';
+  hue: 'cyan' | 'green' | 'yellow' | 'red';
 }): React.ReactElement {
   const glyph = focused ? '◉' : '○';
   const body = ` ${glyph} ${label} `;
@@ -799,5 +934,114 @@ const SubmitButton = memo(function SubmitButton({
     );
   }
   return <Text dimColor>{body}</Text>;
+});
+
+// ── Run-mode dock pieces ─────────────────────────────────────────
+// The composer stays mounted through the running phases; these morph its
+// three rows. Same visual grammar as the idle dock: status where the
+// input was, the pill group on the right, a dim hint line.
+
+const RUN_PHASE_LABEL: Partial<Record<UiPhase, string>> = {
+  discovering: 'Discovering',
+  planning: 'Planning',
+  research: 'Researching',
+};
+
+const RunStatusLine = memo(function RunStatusLine({
+  uiPhase,
+  liveCount,
+  windingDown,
+}: {
+  uiPhase: UiPhase;
+  liveCount: number;
+  windingDown: boolean;
+}): React.ReactElement {
+  // Same inline-spinner pattern as ToolCallItem / PlanningSpinner.
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    const id = setInterval(
+      () => setFrame((f) => (f + 1) % SPINNER_FRAMES.length),
+      SPINNER_TICK_MS,
+    );
+    return () => clearInterval(id);
+  }, []);
+  const label = windingDown
+    ? 'Wrapping up'
+    : (RUN_PHASE_LABEL[uiPhase] ?? 'Running');
+  return (
+    <Box>
+      <Text color={windingDown ? 'yellow' : 'cyan'}>{SPINNER_FRAMES[frame]} </Text>
+      <Text bold>{label}</Text>
+      {uiPhase === 'research' && liveCount > 0 ? (
+        <Text dimColor> · {liveCount} agent{liveCount === 1 ? '' : 's'} live</Text>
+      ) : null}
+    </Box>
+  );
+});
+
+const RunButtons = memo(function RunButtons({
+  inResearch,
+  runFocus,
+  windingDown,
+}: {
+  inResearch: boolean;
+  runFocus: 'wrap_up' | 'stop';
+  windingDown: boolean;
+}): React.ReactElement {
+  // Outside research there's no wrap/stop choice — STOP alone, always the
+  // Enter/Esc target. WRAP UP keeps focus after firing (the pill flips to
+  // a WINDING DOWN indicator) so a reflexive second Enter can't halt the
+  // drain; reaching STOP stays deliberate (Esc / Shift+Tab).
+  return (
+    <Box>
+      {inResearch ? (
+        windingDown ? (
+          <Text color="yellow"> ◐ WINDING DOWN </Text>
+        ) : (
+          <SubmitButton label="WRAP UP" focused={runFocus === 'wrap_up'} hue="yellow" />
+        )
+      ) : null}
+      {inResearch ? <Text>  </Text> : null}
+      <SubmitButton
+        label="STOP"
+        focused={!inResearch || runFocus === 'stop'}
+        hue="red"
+      />
+    </Box>
+  );
+});
+
+const RunHintRow = memo(function RunHintRow({
+  inResearch,
+  runFocus,
+  windingDown,
+  cancelDigits,
+}: {
+  inResearch: boolean;
+  runFocus: 'wrap_up' | 'stop';
+  windingDown: boolean;
+  /** Badge digits of currently-cancellable agents ([] = don't offer). */
+  cancelDigits: number[];
+}): React.ReactElement {
+  if (!inResearch) {
+    return <Text dimColor>esc stop</Text>;
+  }
+  const digitHint =
+    cancelDigits.length > 0
+      ? ` · ${Math.min(...cancelDigits)}-${Math.max(...cancelDigits)} cancel agent`
+      : '';
+  if (windingDown) {
+    return <Text dimColor>wrapping up…{digitHint} · esc stop</Text>;
+  }
+  if (runFocus === 'stop') {
+    return (
+      <Text dimColor>
+        ⏎/esc stop <Text color="red">(discards run)</Text> · ⇧Tab wrap up instead
+      </Text>
+    );
+  }
+  return (
+    <Text dimColor>⇧Tab wrap up/stop · ⏎ fire · w wrap up{digitHint}</Text>
+  );
 });
 

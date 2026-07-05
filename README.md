@@ -118,6 +118,19 @@ All optional. Anything you can set in `harness.json` you can also set on the com
 | `--jsonl` | Stream events as JSONL to stdout (good for piping). |
 | `--verbose` | Verbose logs. |
 
+## Run controls
+
+While a run is active the composer stays docked and morphs: the input row becomes a live status line, and the PLAN/START buttons become **WRAP UP / STOP**.
+
+| Key | Effect |
+|---|---|
+| `w` | Wrap up — stop spawning, drain live agents to best-effort reports, and synthesize from what's found so far. |
+| `⇧Tab` / `⏎` | Toggle WRAP UP ↔ STOP focus / fire the focused control. |
+| `Esc` | Focus STOP (visible arm); press again to stop — discards the run and returns to the composer. During discovery/planning, Esc stops directly. |
+| `1`-`9` | Cancel one flat-mode research agent by its `[N]` card badge (its task number). Siblings keep running; its budget frees up. Offered only while ≥2 agents are live. |
+
+A cancelled agent freezes into scrollback marked `✕ cancelled`; a wrap-up shows `◐ WINDING DOWN` while agents write their reports.
+
 ## Keyboard shortcuts
 
 Standard readline chords (work in every terminal):

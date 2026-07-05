@@ -33,6 +33,10 @@ export function Narrative({ state }: NarrativeProps): React.ReactElement | null 
     const columnWidth = Math.max(MIN_COLUMN_WIDTH, Math.floor(usable / n) - 1);
     const fitsHorizontal = columnWidth * n + n <= cols;
 
+    // The [N] badge is the cancel key: digit N cancels the agent whose
+    // taskIndex is N-1 (stable across the run — researchAgentIds reindexes
+    // as agents finish, task numbers don't). Flat mode only; the run keymap
+    // rejects cancels in deep mode.
     if (fitsHorizontal) {
       return (
         <Box flexDirection="row" marginBottom={1}>
@@ -43,6 +47,7 @@ export function Narrative({ state }: NarrativeProps): React.ReactElement | null 
               headerPrefix={null}
               bodyHeight={bodyHeight}
               width={columnWidth}
+              cancelKey={agent.taskIndex != null ? agent.taskIndex + 1 : null}
             />
           ))}
         </Box>
@@ -58,6 +63,7 @@ export function Narrative({ state }: NarrativeProps): React.ReactElement | null 
             agent={agent}
             headerPrefix={null}
             bodyHeight={Math.max(MIN_BODY_ROWS, Math.floor(bodyHeight / n))}
+            cancelKey={agent.taskIndex != null ? agent.taskIndex + 1 : null}
           />
         ))}
       </Box>
