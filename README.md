@@ -124,9 +124,8 @@ While a run is active the composer stays docked and morphs: the input row become
 
 | Key | Effect |
 |---|---|
-| `w` | Wrap up — stop spawning, drain live agents to best-effort reports, and synthesize from what's found so far. |
-| `⇧Tab` / `⏎` | Toggle WRAP UP ↔ STOP focus / fire the focused control. |
-| `Esc` | Focus STOP (visible arm); press again to stop — discards the run and returns to the composer. During discovery/planning, Esc stops directly. |
+| `⏎` | Fire the focused control. WRAP UP holds focus by default, so Enter = wrap up: stop spawning, drain live agents to best-effort reports, and synthesize from what's found so far. |
+| `Tab` / `⇧Tab` | Move focus WRAP UP ↔ STOP (same grammar as PLAN/START). Firing STOP — discard the run, back to the composer — is always Tab-then-Enter: deliberate by construction. During discovery/planning only STOP exists and Enter fires it. |
 | `1`-`9` | Cancel one flat-mode research agent by its `[N]` card badge (its task number). Siblings keep running; its budget frees up. Offered only while ≥2 agents are live. |
 
 A cancelled agent freezes into scrollback marked `✕ cancelled`; a wrap-up shows `◐ WINDING DOWN` while agents write their reports.

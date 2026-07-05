@@ -198,8 +198,10 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
     state.uiPhase === 'planning' ||
     state.uiPhase === 'research';
   const inResearch = state.uiPhase === 'research';
-  // Which run pill Enter fires. Esc jumps focus here to STOP — the "armed"
-  // state for the destructive action is visible focus, not a hidden timer.
+  // Which run pill Enter fires. Focus moves with Tab/Shift+Tab (same
+  // grammar as PLAN/START); default is WRAP UP, so firing STOP is always
+  // a deliberate Tab-then-Enter — the accidental-discard guard is the
+  // focus model itself, not a confirm step.
   const [runFocus, setRunFocus] = useState<'wrap_up' | 'stop'>('wrap_up');
   // Set locally when wrap_up is dispatched. There is deliberately no
   // reducer-level wind-down state: the engine drains via the WindDown
@@ -238,19 +240,9 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         dispatch({ type: 'quit' });
         return;
       }
-      if (key.escape) {
-        // Outside research there is no wrap/stop choice (desktop mirror:
-        // the popover only exists in research) — Esc stops directly.
-        if (!s.inResearch || s.runFocus === 'stop') {
-          dispatch({ type: 'stop' });
-          return;
-        }
-        setRunFocus('stop');
-        return;
-      }
       if (key.return) {
         if (s.inResearch && s.runFocus === 'wrap_up') {
-          // Repeat sends are harmless — windDown is a signal, not a toggle.
+          if (s.windingDown) return; // pill already morphed to WINDING DOWN
           dispatch({ type: 'wrap_up' });
           setWindingDown(true);
           return;
@@ -262,11 +254,6 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         if (s.inResearch) {
           setRunFocus((f) => (f === 'wrap_up' ? 'stop' : 'wrap_up'));
         }
-        return;
-      }
-      if (input === 'w' && s.inResearch) {
-        dispatch({ type: 'wrap_up' });
-        setWindingDown(true);
         return;
       }
       // Digits cancel one live flat-mode agent by its card badge — the
@@ -989,9 +976,9 @@ const RunButtons = memo(function RunButtons({
   windingDown: boolean;
 }): React.ReactElement {
   // Outside research there's no wrap/stop choice — STOP alone, always the
-  // Enter/Esc target. WRAP UP keeps focus after firing (the pill flips to
-  // a WINDING DOWN indicator) so a reflexive second Enter can't halt the
-  // drain; reaching STOP stays deliberate (Esc / Shift+Tab).
+  // Enter target. WRAP UP keeps focus after firing (the pill flips to a
+  // WINDING DOWN indicator; Enter becomes a no-op) so a reflexive second
+  // Enter can't halt the drain; reaching STOP stays deliberate (Tab).
   return (
     <Box>
       {inResearch ? (
@@ -1024,24 +1011,24 @@ const RunHintRow = memo(function RunHintRow({
   cancelDigits: number[];
 }): React.ReactElement {
   if (!inResearch) {
-    return <Text dimColor>esc stop</Text>;
+    return <Text dimColor>⏎ stop</Text>;
   }
   const digitHint =
     cancelDigits.length > 0
       ? ` · ${Math.min(...cancelDigits)}-${Math.max(...cancelDigits)} cancel agent`
       : '';
   if (windingDown) {
-    return <Text dimColor>wrapping up…{digitHint} · esc stop</Text>;
+    return <Text dimColor>wrapping up…{digitHint} · Tab stop</Text>;
   }
   if (runFocus === 'stop') {
     return (
       <Text dimColor>
-        ⏎/esc stop <Text color="red">(discards run)</Text> · ⇧Tab wrap up instead
+        ⏎ stop <Text color="red">(discards run)</Text> · Tab wrap up instead
       </Text>
     );
   }
   return (
-    <Text dimColor>⇧Tab wrap up/stop · ⏎ fire · w wrap up{digitHint}</Text>
+    <Text dimColor>⏎ wrap up · Tab focus stop{digitHint}</Text>
   );
 });
 
