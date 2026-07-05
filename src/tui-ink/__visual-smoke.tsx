@@ -110,6 +110,24 @@ main(function* () {
         text: '</think>',
         tokenCount: 30,
       } as WorkflowEvent);
+      // Post-</think> the model writes Hermes tool-call XML. The column
+      // must stay quiet through the envelope (marker gating) and only
+      // stream the body after <parameter=result> — exercises
+      // extractStreamingReport in the live render path.
+      bus.send({
+        type: 'agent:produce',
+        agentId: id,
+        text: `<tool_call>\n<function=report>\n<parameter=result>\nLive findings from agent ${id} streaming `,
+        tokenCount: 8,
+      } as WorkflowEvent);
+      yield* sleep(150);
+      bus.send({
+        type: 'agent:produce',
+        agentId: id,
+        text: 'ahead of the final report…',
+        tokenCount: 4,
+      } as WorkflowEvent);
+      yield* sleep(250);
       bus.send({
         type: 'agent:return',
         agentId: id,

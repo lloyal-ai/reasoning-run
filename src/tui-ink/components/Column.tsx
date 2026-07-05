@@ -1,6 +1,7 @@
 import React, { memo, useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import type { AgentRuntime, TimelineItem } from '../state';
+import { extractStreamingReport } from '../state';
 import { colorForLabel } from '../colors';
 import { SPINNER_FRAMES, SPINNER_TICK_MS } from '../spinner-frames';
 
@@ -13,6 +14,9 @@ export interface ColumnProps {
   bodyHeight: number;
   /** Explicit column width (chars) for flat mode; undefined = fill parent (chain). */
   width?: number;
+  /** Cancel-key badge — the digit that cancels this agent (taskIndex + 1).
+   *  Rendered dim in the header. null = no badge (deep mode, recon). */
+  cancelKey?: number | null;
 }
 
 const STATUS_ACTIVE: AgentRuntime['phase'][] = ['thinking', 'content', 'tool'];
@@ -179,10 +183,11 @@ export const ReportItem = memo(function ReportItem({
   );
 });
 
-/** Live post-</think> tokens — the model is writing tool-call JSON, which
- *  for the terminal `report` tool contains the report body. Shown raw so
- *  the user sees the text streaming rather than waiting for the final
- *  parsed blob. Cleared by the reducer on tool_call / report. */
+/** Live report body streaming out of the agent — either the marker-gated
+ *  slice of the Hermes tool-call buffer (voluntary report) or the raw
+ *  recovery buffer (forced report; no envelope). The caller does that
+ *  extraction; this just renders. Cleared by the reducer on tool_call /
+ *  report. */
 const ContentStream = memo(function ContentStream({
   buffer,
   color,
@@ -194,7 +199,7 @@ const ContentStream = memo(function ContentStream({
     <Box flexDirection="column" marginTop={1} flexShrink={0}>
       <Box>
         <Text color={color}>▸ </Text>
-        <Text dimColor bold>streaming</Text>
+        <Text dimColor bold>writing report</Text>
       </Box>
       <Box paddingLeft={2}>
         <Text dimColor>{buffer}▎</Text>
@@ -210,14 +215,24 @@ const ContentStream = memo(function ContentStream({
  *  gets the rest of the column's budget. */
 const HEADER_ROWS = 3;
 
+/** Header status glyph — four states, matching the desktop card pills:
+ *  ● live (agent color) / ◐ recovering (writing forced report) /
+ *  ✕ failed (incl. user_cancel) / ✓ done. */
+function statusGlyph(agent: AgentRuntime, color: string): React.ReactElement {
+  if (agent.recovering) return <Text color="yellow">◐</Text>;
+  if (agent.phase === 'failed') return <Text color="red">✕</Text>;
+  if (isActive(agent)) return <Text color={color}>●</Text>;
+  return <Text color="green">✓</Text>;
+}
+
 export const Column = memo(function Column({
   agent,
   headerPrefix,
   bodyHeight,
   width,
+  cancelKey = null,
 }: ColumnProps): React.ReactElement {
   const color = colorForLabel(agent.label);
-  const active = isActive(agent);
 
   const descText = agent.taskDescription ?? null;
 
@@ -225,6 +240,14 @@ export const Column = memo(function Column({
   // as content streams. overflow="hidden" honors the measured height via
   // Yoga + Ink's renderer.
   const totalHeight = bodyHeight + HEADER_ROWS;
+
+  // Voluntary reports stream inside Hermes tool-call XML — show only the
+  // report body (marker-gated; null until <parameter=result> arrives).
+  // Forced recovery streams raw prose with no envelope: use the buffer
+  // verbatim. Same branch as the desktop renderer (Work.tsx).
+  const liveStream = agent.recovering
+    ? agent.contentBuffer
+    : extractStreamingReport(agent.contentBuffer);
 
   return (
     <Box
@@ -238,10 +261,11 @@ export const Column = memo(function Column({
     >
       {/* Header */}
       <Box flexShrink={0}>
+        {cancelKey != null ? <Text dimColor>[{cancelKey}] </Text> : null}
         {headerPrefix ? <Text dimColor>{headerPrefix} · </Text> : null}
         <Text color={color} bold>{agent.label}</Text>
         <Box flexGrow={1} />
-        <Text color={active ? color : 'green'}>{active ? '●' : '✓'}</Text>
+        {statusGlyph(agent, color)}
       </Box>
       {descText ? (
         <Text dimColor>{descText}</Text>
@@ -281,8 +305,8 @@ export const Column = memo(function Column({
           }
           return null;
         })}
-        {agent.contentBuffer ? (
-          <ContentStream buffer={agent.contentBuffer} color={color} />
+        {liveStream && liveStream.trim() ? (
+          <ContentStream buffer={liveStream} color={color} />
         ) : null}
       </Box>
     </Box>
