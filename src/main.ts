@@ -25,7 +25,12 @@ import {
   call,
 } from "effection";
 import type { Operation, Task } from "effection";
-import { createContext } from "@lloyal-labs/lloyal.node";
+import {
+  createContext,
+  ensureBackendPack,
+  probeBackendPack,
+  resolveBackendPackDirSync,
+} from "@lloyal-labs/lloyal.node";
 import type { SessionContext } from "@lloyal-labs/sdk";
 import {
   initAgents,
@@ -168,6 +173,7 @@ const { values: flags, positionals } = parseArgs({
     "n-ctx": { type: "string" },
     "output-dir": { type: "string" },
     "replay-trace": { type: "string" },
+    "backend-pack": { type: "string" },
     jsonl: { type: "boolean", default: false },
     verbose: { type: "boolean", default: false },
   },
@@ -182,6 +188,21 @@ if (
 ) {
   process.stderr.write(
     `Invalid --reasoning-mode: ${reasoningModeFlag}. Expected "flat" or "deep".\n`,
+  );
+  process.exit(1);
+}
+
+// BACKEND_DL pack behavior for headless/scripted runs. Interactive TTY
+// boots offer a Download / Not now dialog instead; this flag overrides in
+// both directions ("download" = auto-accept, "skip" = never probe).
+const backendPackFlag = flags["backend-pack"];
+if (
+  backendPackFlag !== undefined &&
+  backendPackFlag !== "download" &&
+  backendPackFlag !== "skip"
+) {
+  process.stderr.write(
+    `Invalid --backend-pack: ${backendPackFlag}. Expected "download" or "skip".\n`,
   );
   process.exit(1);
 }
@@ -858,6 +879,112 @@ main(function* () {
     return { type: "quit" };
   }
 
+  function* awaitBackendPackDecision(): Operation<boolean> {
+    for (const cmd of yield* each(commands)) {
+      if (cmd.type === "accept_backend_pack") {
+        yield* each.next();
+        return true;
+      }
+      if (cmd.type === "decline_backend_pack" || cmd.type === "quit") {
+        yield* each.next();
+        return false;
+      }
+      yield* each.next();
+    }
+    return false;
+  }
+
+  /** Boot-time BACKEND_DL pack acquisition (design §3.3 path: consented
+   *  prompt). Gates: cuda + linux + not previously declined + no cached
+   *  pack. Probe failures (offline, no nvidia-smi) skip silently to the
+   *  npm chain — the offer must never block a boot. On accept, the
+   *  archives stream through the standard download UI and the SAME boot
+   *  iteration proceeds: loadBinary resolves the fresh cache inside
+   *  createContext. Decline persists model.backendPack=false. */
+  function* maybeOfferBackendPack(): Operation<void> {
+    if (liveConfig.model.gpu !== "cuda" || process.platform !== "linux") return;
+    if (backendPackFlag === "skip") return;
+    if (liveConfig.model.backendPack === false && backendPackFlag !== "download") return;
+    if (resolveBackendPackDirSync()) return; // already installed
+
+    let probe: Awaited<ReturnType<typeof probeBackendPack>>;
+    try {
+      probe = yield* call(() => probeBackendPack());
+    } catch (err) {
+      if (verbose) {
+        process.stderr.write(`[backend-pack] probe skipped: ${errorMessage(err)}\n`);
+      }
+      return;
+    }
+    if (!probe.recommended) return;
+
+    const totalBytes =
+      probe.sizeBytes + (probe.needsRuntimeArchive ? probe.runtimeSizeBytes : 0);
+    let accepted: boolean;
+    if (backendPackFlag === "download") {
+      accepted = true;
+    } else if (!useInk) {
+      // Headless (jsonl / bridge / non-TTY): never prompt, never download
+      // unasked — one legible line, then the npm chain.
+      process.stderr.write(
+        `[backend-pack] ${probe.gpu?.name ?? "CUDA GPU"}: signed full-arch pack available ` +
+          `(${(totalBytes / 1e9).toFixed(1)} GB). Pass --backend-pack download to install; ` +
+          `continuing on the npm binary.\n`,
+      );
+      return;
+    } else {
+      uiChannel.send({
+        type: "backendpack:offer",
+        gpuName: probe.gpu?.name ?? "CUDA GPU",
+        sizeBytes: probe.sizeBytes,
+        needsRuntime: probe.needsRuntimeArchive,
+        runtimeSizeBytes: probe.runtimeSizeBytes,
+        reasons: probe.reasons,
+      });
+      accepted = yield* awaitBackendPackDecision();
+    }
+
+    if (!accepted) {
+      saveConfig({ model: { backendPack: false } }, configPath);
+      const reloaded = reloadLiveConfig();
+      liveConfig = reloaded.config;
+      liveOrigin = reloaded.origin;
+      uiChannel.send({
+        type: "config:updated",
+        config: liveConfig,
+        origin: liveOrigin,
+        savedTo: reloaded.path,
+        gitignored: false,
+        skipped: [],
+      });
+      return;
+    }
+
+    const entries = [
+      { id: "backend-pack", label: "CUDA backend pack", sizeBytes: probe.sizeBytes },
+      ...(probe.needsRuntimeArchive
+        ? [{ id: "cuda-runtime", label: "CUDA runtime libraries", sizeBytes: probe.runtimeSizeBytes }]
+        : []),
+    ];
+    uiChannel.send({ type: "download:plan", entries });
+    for (const e of entries) {
+      uiChannel.send({ type: "download:start", ...e });
+    }
+    yield* call(() =>
+      ensureBackendPack({
+        includeRuntime: probe.needsRuntimeArchive,
+        onProgress: (got, total, file) => {
+          // ensureBackendPack labels its archives 'backend-pack' /
+          // 'cuda-runtime' — the same ids planned above.
+          uiChannel.send({ type: "download:progress", id: file, got, total });
+        },
+      }),
+    );
+    for (const e of entries) {
+      uiChannel.send({ type: "download:complete", id: e.id });
+    }
+  }
+
   // ── Per-session restart loop ──────────────────────────────────
   // Each iteration spawns a child task that owns ctx, reranker, the agent
   // event-forwarder, and the command loop. Returning "restart" from the
@@ -938,6 +1065,11 @@ main(function* () {
           // what steers the reranker below — rig has no loadOptions passthrough.
           applyGpuEnv({ config: liveConfig, origin: liveOrigin });
           const gpuNow = liveConfig.model.gpu;
+
+          // BACKEND_DL pack: probe + consented download (or headless flag)
+          // BEFORE the context loads — loadBinary resolves the pack cache
+          // ahead of the npm chain, so an accepted pack serves THIS boot.
+          yield* maybeOfferBackendPack();
 
           lastFailedKind = "llm";
           uiChannel.send({ type: "weights:start", label: `Loading ${modelNameNow}…` });

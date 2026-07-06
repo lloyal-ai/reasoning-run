@@ -17,6 +17,7 @@ import { PlanningSpinner } from './PlanningSpinner';
 import { Discovering } from './Discovering';
 import { ClarifyPanel } from './ClarifyPanel';
 import { BootStatus } from './BootStatus';
+import { BackendPackOffer } from './BackendPackOffer';
 
 export interface AppProps {
   bus: EventBus<WorkflowEvent>;
@@ -38,7 +39,8 @@ export function App({ bus, dispatch, bootstrap }: AppProps): React.ReactElement 
     state.uiPhase !== 'discovering' &&
     state.uiPhase !== 'planning' &&
     state.uiPhase !== 'plan_review' &&
-    state.uiPhase !== 'clarifying';  // components below render their own header
+    state.uiPhase !== 'clarifying' &&
+    state.uiPhase !== 'backend_pack_offer';  // components below render their own header
 
   const showResults = state.uiPhase === 'research' || state.uiPhase === 'done';
   // The composer dock persists through the running phases: its input row
@@ -83,6 +85,7 @@ export function App({ bus, dispatch, bootstrap }: AppProps): React.ReactElement 
           state.uiPhase === 'boot_error') && (
           <BootStatus state={state} />
         )}
+        {state.uiPhase === 'backend_pack_offer' && <BackendPackOffer state={state} />}
         {state.uiPhase === 'discovering' && <Discovering state={state} />}
         {state.uiPhase === 'planning' && <PlanningSpinner state={state} />}
         {state.uiPhase === 'plan_review' && <PlanReview state={state} />}

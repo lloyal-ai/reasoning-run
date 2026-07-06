@@ -27,7 +27,8 @@ export type UiPhase =
   | 'clarifying'     // planner asked questions; composer takes the answer
   | 'research'       // column layout streaming
   | 'done'           // research complete, results visible, composer below
-  | 'boot_error';    // download/load failed; recovery via /model or /quit
+  | 'boot_error'     // download/load failed; recovery via /model or /quit
+  | 'backend_pack_offer'; // CUDA pack available — Download / Not now dialog
 
 /** User-facing reasoning mode. 'deep' == chain-shaped orchestration
  *  (sequential tasks that build on each other); 'flat' == parallel-shaped
@@ -282,6 +283,14 @@ export interface AppState {
   warm: boolean;
   /** Top-level view state — drives App.tsx branching. */
   uiPhase: UiPhase;
+  /** Payload for uiPhase 'backend_pack_offer'; null outside that phase. */
+  backendPackOffer: {
+    gpuName: string;
+    sizeBytes: number;
+    needsRuntime: boolean;
+    runtimeSizeBytes: number;
+    reasons: string[];
+  } | null;
   /** Workflow phase — drives footer label, narrative visibility, etc. */
   phase: Phase;
   mode: Mode | null;
@@ -384,6 +393,7 @@ export const initialState: AppState = {
   query: '',
   warm: false,
   uiPhase: 'boot',
+  backendPackOffer: null,
   phase: 'idle',
   mode: null,
   plan: null,

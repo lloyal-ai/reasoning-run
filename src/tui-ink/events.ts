@@ -93,6 +93,18 @@ export type StepEvent =
   | { type: 'weights:done' }
   | { type: 'corpus:indexed'; corpusPath: string; fileCount: number; chunkCount: number }
   | { type: 'boot:error'; kind: 'llm' | 'reranker'; message: string }
+  /** Boot-time BACKEND_DL pack offer: a CUDA GPU was probed and a signed
+   *  full-arch pack is available for it. Rendered as a Download / Not now
+   *  dialog (uiPhase 'backend_pack_offer'); answered via the
+   *  accept_backend_pack / decline_backend_pack commands. */
+  | {
+      type: 'backendpack:offer';
+      gpuName: string;
+      sizeBytes: number;
+      needsRuntime: boolean;
+      runtimeSizeBytes: number;
+      reasons: string[];
+    }
   // Per-query App participation toggle. Emitted by main.ts in response to
   // a `toggle_participation` Command from the Composer. The reducer flips
   // the bit in `state.participation[name]`. Pure UI state — no harness

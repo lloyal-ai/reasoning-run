@@ -65,6 +65,10 @@ export interface ConfigModel {
   /** GPU backend variant. Null/undefined falls through to CLI/env/default
    *  (env source: LLOYAL_GPU). */
   gpu?: ConfigGpu;
+  /** BACKEND_DL pack consent. `false` = user declined the boot-time offer
+   *  ("won't ask again"); undefined = never asked / may offer. Never `true`:
+   *  acceptance is evidenced by the cache itself, not a config bit. */
+  backendPack?: boolean;
 }
 
 export interface Config {
@@ -234,7 +238,15 @@ export function loadConfig(
       effort: base.defaults.effort,
       maxTurns: base.defaults.maxTurns,
     },
-    model: { path: modelPath, reranker, nCtx, gpu },
+    model: {
+      path: modelPath,
+      reranker,
+      nCtx,
+      gpu,
+      // File-only field (no CLI/env rung): only a literal false is
+      // meaningful — anything else reads as "never asked".
+      backendPack: base.model.backendPack === false ? false : undefined,
+    },
   };
 
   const origin: ConfigOrigin = {

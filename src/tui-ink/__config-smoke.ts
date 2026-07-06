@@ -88,6 +88,10 @@ check('save: writes app config under apps[name], then reload returns it', () => 
   const dir = scratchDir('save');
   const file = path.join(dir, 'harness.json');
   saveConfig({ apps: { web: { tavilyKey: 'tvly-abc' } } }, file, {});
+  // BACKEND_DL decline persistence: false survives a round-trip (the boot
+  // gate reads it to suppress the offer forever).
+  saveConfig({ model: { backendPack: false } }, file, {});
+  assert.equal(loadConfig(file, {}, {}).config.model.backendPack, false);
   assert.equal(fs.existsSync(file), true);
   const { config } = loadConfig(file, {}, {});
   assert.equal(config.apps.web.tavilyKey, 'tvly-abc');
