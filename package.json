@@ -1,6 +1,6 @@
 {
   "name": "reasoning.run",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "A private reasoner for your terminal. Direct conversation or grounded multi-agent research, GPU-native and fully local. No API keys, no inference servers.",
   "bin": {
     "reasoning.run": "bin/run.js"
@@ -23,7 +23,7 @@
     "@inkjs/ui": "^2.0.0",
     "@lloyal-labs/corpus-app": "https://apps.lloyal.ai/v1/bundles/lloyal__corpus-1.2.0.tgz",
     "@lloyal-labs/lloyal-agents": "^3.2.0",
-    "@lloyal-labs/lloyal.node": "^3.0.1",
+    "@lloyal-labs/lloyal.node": "^3.1.0",
     "@lloyal-labs/rig": "^3.1.2",
     "@lloyal-labs/sdk": "^3.0.3",
     "@lloyal-labs/web-app": "https://apps.lloyal.ai/v1/bundles/lloyal__web-1.2.0.tgz",
