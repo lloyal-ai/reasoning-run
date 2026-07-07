@@ -92,7 +92,7 @@ export type StepEvent =
   | { type: 'weights:label'; label: string }
   | { type: 'weights:done' }
   | { type: 'corpus:indexed'; corpusPath: string; fileCount: number; chunkCount: number }
-  | { type: 'boot:error'; kind: 'llm' | 'reranker'; message: string }
+  | { type: 'boot:error'; kind: 'llm' | 'reranker' | 'backend-pack'; message: string }
   /** Boot-time BACKEND_DL pack offer: a CUDA GPU was probed and a signed
    *  full-arch pack is available for it. Rendered as a Download / Not now
    *  dialog (uiPhase 'backend_pack_offer'); answered via the

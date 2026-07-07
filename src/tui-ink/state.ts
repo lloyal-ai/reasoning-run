@@ -373,7 +373,7 @@ export interface AppState {
    *  `/reranker <path>` to retry with a local .gguf, or `/quit`. `kind`
    *  determines which CTA is highlighted. Null once boot has progressed
    *  past the failure or the recovery succeeded. */
-  bootError: { kind: 'llm' | 'reranker'; message: string } | null;
+  bootError: { kind: 'llm' | 'reranker' | 'backend-pack'; message: string } | null;
   /** Per-app participation in the next query, keyed by `manifest.name`.
    *  `true` = included; `false` = configured-but-excluded (user opted out
    *  for this session); missing key = treat as included by default. The

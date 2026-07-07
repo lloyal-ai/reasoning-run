@@ -1046,7 +1046,7 @@ main(function* () {
       let firstBootIteration = iterCaptured === 0;
 
       while (ctx === null || reranker === null) {
-        let lastFailedKind: "llm" | "reranker" = "llm";
+        let lastFailedKind: "llm" | "reranker" | "backend-pack" = "llm";
         try {
           if (!firstBootIteration) {
             planDownloads([llmResolvedNow, rerankerResolvedNow]);
@@ -1069,6 +1069,12 @@ main(function* () {
           // BACKEND_DL pack: probe + consented download (or headless flag)
           // BEFORE the context loads — loadBinary resolves the pack cache
           // ahead of the npm chain, so an accepted pack serves THIS boot.
+          // Probe errors are swallowed inside (the offer never blocks boot);
+          // only post-ACCEPT failures (download/sha/extract) throw to the
+          // catch below — label them so the error screen doesn't blame the
+          // reranker. A failed install writes no completion marker, so the
+          // offer re-fires on the next boot: relaunch IS the retry path.
+          lastFailedKind = "backend-pack";
           yield* maybeOfferBackendPack();
 
           lastFailedKind = "llm";

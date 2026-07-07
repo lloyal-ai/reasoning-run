@@ -32,8 +32,11 @@ export const BootStatus = memo(function BootStatus({
   if (state.uiPhase === 'boot_error') {
     const err = state.bootError;
     const kind = err?.kind ?? 'llm';
-    const failedLabel = kind === 'llm' ? 'LLM' : 'reranker';
-    const primaryCmd = kind === 'llm' ? '/model' : '/reranker';
+    const failedLabel =
+      kind === 'llm' ? 'LLM' : kind === 'reranker' ? 'reranker' : 'backend pack';
+    // backend-pack failures recover by relaunching (a failed install leaves
+    // no completion marker, so the offer re-fires) or by switching backends.
+    const primaryCmd = kind === 'llm' ? '/model' : kind === 'reranker' ? '/reranker' : '/gpu';
     const secondaryCmd = kind === 'llm' ? '/reranker' : '/model';
     return (
       <Box flexDirection="column" marginBottom={1}>
