@@ -671,6 +671,19 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
 
     // ── Boot phases ────────────────────────────────────────────
 
+    case 'backendpack:offer':
+      return {
+        ...state,
+        uiPhase: 'backend_pack_offer',
+        backendPackOffer: {
+          gpuName: ev.gpuName,
+          sizeBytes: ev.sizeBytes,
+          needsRuntime: ev.needsRuntime,
+          runtimeSizeBytes: ev.runtimeSizeBytes,
+          reasons: ev.reasons,
+        },
+      };
+
     case 'download:plan':
       // Plan is the ONLY event that grows state.downloads. Replaces the
       // array entirely with one entry per planned download. start /
@@ -679,6 +692,7 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
       return {
         ...state,
         uiPhase: 'downloading',
+        backendPackOffer: null,
         downloads: ev.entries.map((e) => ({
           id: e.id,
           label: e.label,
@@ -721,7 +735,9 @@ export function reduce(state: AppState, ev: WorkflowEvent): AppState {
       };
 
     case 'weights:start':
-      return { ...state, uiPhase: 'loading', loadingLabel: ev.label };
+      // Also exits 'backend_pack_offer' on the decline path (no download
+      // plan fires — boot proceeds straight to the load phase).
+      return { ...state, uiPhase: 'loading', loadingLabel: ev.label, backendPackOffer: null };
 
     case 'weights:label':
       return { ...state, loadingLabel: ev.label };

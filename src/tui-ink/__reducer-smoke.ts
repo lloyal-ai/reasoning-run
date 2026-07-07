@@ -1088,5 +1088,33 @@ check('extractStreamingReport: marker-gated report body from Hermes buffer', () 
   // renderer bypasses extraction entirely when agent.recovering is true.
 });
 
+check('backendpack:offer → dialog phase; plan/weights exit it', () => {
+  const offer = {
+    type: 'backendpack:offer' as const,
+    gpuName: 'NVIDIA H100 80GB HBM3',
+    sizeBytes: 800_000_000,
+    needsRuntime: true,
+    runtimeSizeBytes: 250_000_000,
+    reasons: ['native sm_90 SASS in pack', 'runtime 12.2 < required 12.9'],
+  };
+  const offered = reduce(initialState, offer);
+  assert.equal(offered.uiPhase, 'backend_pack_offer');
+  assert.equal(offered.backendPackOffer?.gpuName, 'NVIDIA H100 80GB HBM3');
+  assert.equal(offered.backendPackOffer?.needsRuntime, true);
+
+  // Accept path: download:plan takes over the screen and clears the payload.
+  const accepted = reduce(offered, {
+    type: 'download:plan',
+    entries: [{ id: 'backend-pack', label: 'CUDA backend pack', sizeBytes: 800_000_000 }],
+  });
+  assert.equal(accepted.uiPhase, 'downloading');
+  assert.equal(accepted.backendPackOffer, null);
+
+  // Decline path: boot proceeds straight to the load phase.
+  const declined = reduce(offered, { type: 'weights:start', label: 'Loading…' });
+  assert.equal(declined.uiPhase, 'loading');
+  assert.equal(declined.backendPackOffer, null);
+});
+
 process.stdout.write('---\n');
 process.stdout.write(process.exitCode ? 'FAILED\n' : 'all passed\n');

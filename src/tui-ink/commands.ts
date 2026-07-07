@@ -31,6 +31,11 @@ export type Command =
   // ctx + reranker reload on the new backend). Values mirror lloyal.node's
   // GpuVariant; 'default' = the platform binary's built-in backend.
   | { type: 'set_gpu'; gpu: 'default' | 'cuda' | 'vulkan' }
+  // Boot-time BACKEND_DL pack offer (uiPhase 'backend_pack_offer'). Accept
+  // downloads + installs the pack for this and every future boot; decline
+  // persists model.backendPack=false so the offer never re-fires.
+  | { type: 'accept_backend_pack' }
+  | { type: 'decline_backend_pack' }
   | { type: 'toggle_participation'; name: string }
   // Escape hatch: interrupt the in-flight run (planner / research / synth) and
   // return to the composer. Handled in main.ts's command loop by halting the

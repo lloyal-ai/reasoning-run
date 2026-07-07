@@ -112,6 +112,7 @@ All optional. Anything you can set in `harness.json` you can also set on the com
 | `--n-ctx <int>` | LLM context window in tokens. |
 | `--corpus <path>` | Local file/glob source (same as `/scan`). |
 | `--output-dir <dir>` | Where run artifacts are written (same as `/output`). |
+| `--backend-pack <download\|skip>` | BACKEND_DL pack behavior (Linux + `--gpu cuda`). Interactive boots offer a Download / Not now dialog when a signed full-architecture CUDA pack matches the detected GPU; `download` auto-accepts (headless/deploy), `skip` never probes. Declining in the dialog persists `model.backendPack: false` — the offer won't repeat until you edit `harness.json`. |
 | `--reranker <path>` | Local reranker `.gguf` (same as `/reranker`). |
 | `--findings-budget <int>` | Cap (in chars) on per-agent findings forwarded to synth. Default unbounded. |
 | `--config <path>` | Use a non-default `harness.json`. |
