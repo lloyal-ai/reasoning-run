@@ -27,7 +27,9 @@ Then type a research question.
 - **Hot model swap.** `/model <path>` rebuilds the harness against a new `.gguf` mid-session. Test against different model sizes and quants in seconds, same process.
 - **Bundled output per query.** `report.md` (synth answer) + `annexure-N.md` (each research agent's full report) on disk. Grep, diff, share.
 
-First run downloads a Qwen3.5-4B LLM and Qwen3 reranker (~3 GB total, cached in `~/.cache/lloyal/models/`). After that it's all local.
+**Requires [Node.js](https://nodejs.org) ≥ 24.** First run downloads a Qwen3.5-4B LLM and Qwen3 reranker (~3 GB total, cached in `~/.cache/lloyal/models/`) and needs the network once; after that it's all local.
+
+📚 **Full docs → [`docs/`](docs/):** [Getting started](docs/getting-started.md) · [How a run works](docs/guides/how-a-run-works.md) · [CLI reference](docs/cli-reference.md) · [Configuration](docs/configuration.md) · [Models & GPU](docs/guides/models-and-gpu.md) · [Troubleshooting](docs/troubleshooting.md)
 
 ## Configuration
 
@@ -44,7 +46,7 @@ State lives in `./harness.json` (auto-created, auto-gitignored on first save):
   },
   "defaults": {
     "reasoningMode": "flat",           // or "deep"
-    "effort": "high"                   // or "medium" | "low"
+    "effort": "high"                   // or "medium" | "low" | "ultra"
   },
   "model": {
     "path": "/path/to/llm.gguf",       // optional — local LLM (else catalog default)
@@ -67,6 +69,7 @@ Type `/` in the composer to open the command palette. Tab autocompletes; Enter r
 | `/model <path>` | Use a local LLM `.gguf` instead of the catalog default. |
 | `/reranker <path>` | Use a local reranker `.gguf` instead of the catalog default. |
 | `/gpu <cuda\|vulkan\|default>` | Set the GPU backend; restarts the model on the new binding. |
+| `/effort` | Open the effort slider — pick the run effort tier (`low`·`medium`·`high`·`ultra`). |
 | `/deep` | Switch to deep (chain) reasoning mode. |
 | `/flat` | Switch to flat (parallel) reasoning mode. |
 | `/help` | Show the command list inline. |
@@ -91,7 +94,7 @@ Every query writes a self-contained bundle under `<output-dir>/<ISO-timestamp>/`
     annexure-1.md
 ```
 
-`<output-dir>` defaults to the directory you launched from. Override with `--output-dir <path>` or the composer's `O` hotkey. The session trace captures every query (including warm follow-ups) in one file.
+`<output-dir>` defaults to the directory you launched from. Override with `--output-dir <path>` or the `/output <dir>` command. The session trace captures every query (including warm follow-ups) in one file.
 
 ### Environment overrides
 
@@ -116,6 +119,7 @@ All optional. Anything you can set in `harness.json` you can also set on the com
 | `--reranker <path>` | Local reranker `.gguf` (same as `/reranker`). |
 | `--findings-budget <int>` | Cap (in chars) on per-agent findings forwarded to synth. Default unbounded. |
 | `--config <path>` | Use a non-default `harness.json`. |
+| `--replay-trace <path>` | Re-run a past session from its saved `trace-*.jsonl` instead of a typed question (one-shot, JSONL, no TUI). |
 | `--jsonl` | Stream events as JSONL to stdout (good for piping). |
 | `--verbose` | Verbose logs. |
 
