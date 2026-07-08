@@ -24,7 +24,7 @@ export type Command =
   | { type: 'set_output_dir'; path: string }
   // Global run-effort setting (pure policy preset). Set in Settings → Effort;
   // persisted to harness.json and applied to every subsequent query.
-  | { type: 'set_effort'; effort: 'low' | 'medium' | 'high' }
+  | { type: 'set_effort'; effort: 'low' | 'medium' | 'high' | 'ultra' }
   | { type: 'set_model_path'; path: string }
   | { type: 'set_reranker_path'; path: string }
   // GPU backend variant (persisted as model.gpu; main.ts restarts the boot so

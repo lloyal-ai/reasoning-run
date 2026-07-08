@@ -10,7 +10,7 @@
  * The effort levers are: KV reserve (`context`), time budget, planner breadth
  * (`maxTasks`), and the reranker explore→exploit threshold (`shouldExplore`).
  */
-export type Effort = 'low' | 'medium' | 'high'
+export type Effort = 'low' | 'medium' | 'high' | 'ultra'
 
 export interface EffortPreset {
   budget: {
@@ -33,6 +33,23 @@ export interface EffortPreset {
 }
 
 export const EFFORT_PRESETS: Record<Effort, EffortPreset> = {
+  // ULTRA — the ceiling tier, hand-tuned for a large (~1M-token) nCtx. NOTE: the
+  // context limits are ABSOLUTE free-KV reserve floors, NOT nCtx-derived — nothing
+  // here auto-scales from the context window; these are hand-authored (see the
+  // module header). `maxTasks: 10` is past the planner's tested `>6` boundary
+  // ("shared-spine overflow" territory) — unproven, worth a real run to calibrate.
+  ultra: {
+    budget: {
+      // ~4× high — extra recovery/report headroom for a 10-task fan-out at ~1M nCtx.
+      context: { softLimit: 8192, hardLimit: 4096 },
+      // 10 min soft / 15 min hard — 10 tasks against a large model.
+      time: { softLimit: 600_000, hardLimit: 900_000 },
+    },
+    maxTasks: 10,
+    // Explore until 75% KV used (25% available) — hunts novel facts even longer
+    // than high (0.4) before tightening to strict dual-entailment retrieval.
+    shouldExplore: { context: 0.25 },
+  },
   high: {
     budget: {
       context: { softLimit: 2048, hardLimit: 1024 },
@@ -71,4 +88,4 @@ export const EFFORT_PRESETS: Record<Effort, EffortPreset> = {
 }
 
 /** Display order for UI (lightest → heaviest). */
-export const EFFORT_ORDER: readonly Effort[] = ['low', 'medium', 'high']
+export const EFFORT_ORDER: readonly Effort[] = ['low', 'medium', 'high', 'ultra']
