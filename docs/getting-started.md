@@ -8,7 +8,7 @@ reasoning.run is a private reasoner for your terminal: it runs a small team of r
 
 - **Node.js ≥ 24 — required.** This is a hard floor. On an older Node the CLI fails to start with a cryptic error; check with `node --version` and upgrade first if you're below 24. (If you hit this, see [Troubleshooting](./troubleshooting.md).)
 - **~3 GB free disk and a network connection for the first run only.** The first run downloads the default models (~3 GB, see [First run](#first-run) below). Once they're cached, every later run is fully offline — no network needed.
-- **Memory: 16 GB recommended · ~8 GB minimum** (default 4B model). The default setup — a 4B model with a shared 32K-token context — runs comfortably at 16 GB (the demo is a 16 GB MacBook), and can run in as little as ~8 GB; below that isn't tested, and larger models or context windows need more. With a discrete GPU the model loads into VRAM (the default needs only a few GB); otherwise it uses system RAM.
+- **Memory: 16 GB recommended · 12 GB minimum** (default 4B model). The default setup — a 4B model with a shared 32K-token context — runs comfortably at 16 GB (the demo is a 16 GB MacBook); 12 GB is the supported minimum, and larger models or context windows need more. With a discrete GPU the model loads into VRAM (the default needs only a few GB); otherwise it uses system RAM.
 
 **Operating systems and GPUs:**
 
