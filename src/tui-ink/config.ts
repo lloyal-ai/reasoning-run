@@ -36,7 +36,7 @@ export interface ConfigDefaults {
   reasoningMode: 'flat' | 'deep';
   /** Run effort preset — the session default for the composer's effort control
    *  (pure policy: budget + planner breadth + recovery cap). @default 'high' */
-  effort: 'low' | 'medium' | 'high';
+  effort: 'low' | 'medium' | 'high' | 'ultra';
   maxTurns: number;
 }
 

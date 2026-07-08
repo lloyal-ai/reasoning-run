@@ -34,10 +34,13 @@ import { Box, Text, useInput } from 'ink';
 import type { AppState, UiPhase } from '../state';
 import { useCommand } from '../hooks/useCommand';
 import { TextInput } from './TextInput';
+import { EffortSlider } from './EffortSlider';
+import { UltraSplash } from './UltraSplash';
+import type { Effort } from '../../effort-presets';
 import { shortPath } from '../path-utils';
 import { SPINNER_FRAMES, SPINNER_TICK_MS } from '../spinner-frames';
 
-type Field = 'query' | 'web' | 'scan' | 'output' | 'model' | 'reranker';
+type Field = 'query' | 'web' | 'scan' | 'output' | 'model' | 'reranker' | 'effort';
 
 type SlashCmdKind = 'instant' | 'value';
 
@@ -56,6 +59,7 @@ const COMMANDS: SlashCmd[] = [
   { name: 'reranker', desc: 'Set local reranker .gguf path', kind: 'value' },
   { name: 'gpu', desc: 'Set GPU backend (cuda|vulkan|default)', kind: 'value' },
   { name: 'output', desc: 'Set output directory', kind: 'value' },
+  { name: 'effort', desc: 'Set run effort (low·medium·high·ultra)', kind: 'instant' },
   { name: 'deep', desc: 'Use deep (chain) reasoning', kind: 'instant' },
   { name: 'flat', desc: 'Use flat (parallel) reasoning', kind: 'instant' },
   { name: 'help', desc: 'Show this list', kind: 'instant' },
@@ -98,6 +102,10 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
   const [query, setQuery] = useState('');
   const [draft, setDraft] = useState('');
   const [showHelp, setShowHelp] = useState(false);
+  // Transient "ultra selected" splash. Local-only — no reducer/AppState. While
+  // it's up the field stays on 'effort' so the query keymap remains inert; the
+  // splash's own timer returns focus to the query line when it dismisses.
+  const [ultraSplash, setUltraSplash] = useState(false);
   // Submit mode toggled by Shift+Tab. PLAN runs the planner and shows
   // the plan-review dialog; START synthesizes a single-task plan from
   // the literal query and skips plan-review. Default flips after the
@@ -467,6 +475,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
     if (cmd.kind === 'instant') {
       if (name === 'deep') setMode('deep');
       else if (name === 'flat') setMode('flat');
+      else if (name === 'effort') setField('effort');
       else if (name === 'quit') dispatch({ type: 'quit' });
       else if (name === 'help') setShowHelp(true);
       return;
@@ -556,6 +565,36 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
     setDraft('');
   };
 
+  // Effort slider (opened via /effort). Enter commits the picked tier; the
+  // set_effort handler in main.ts persists defaults.effort → harness.json and
+  // echoes config:updated. Selecting `ultra` triggers the splash (which returns
+  // focus to the query line on dismiss); the rest close straight back.
+  const commitEffort = (tier: Effort): void => {
+    dispatch({ type: 'set_effort', effort: tier });
+    if (tier === 'ultra') {
+      setUltraSplash(true);
+    } else {
+      setField('query');
+    }
+  };
+  const cancelEffort = (): void => {
+    setField('query');
+  };
+
+  // Ultra splash takes over the composer dock for its short duration, then
+  // dismisses itself back to the query line. Placed AFTER every hook above so
+  // hook order is stable across renders.
+  if (ultraSplash) {
+    return (
+      <UltraSplash
+        onDone={() => {
+          setUltraSplash(false);
+          setField('query');
+        }}
+      />
+    );
+  }
+
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
       {/* Main row: run status line, query input, or inline editor */}
@@ -631,6 +670,12 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
             placeholder="/path/to/qwen3.5-4b.gguf"
           />
         </Box>
+      ) : field === 'effort' ? (
+        <EffortSlider
+          current={state.config?.defaults.effort ?? 'high'}
+          onCommit={commitEffort}
+          onCancel={cancelEffort}
+        />
       ) : (
         <Box>
           <Text color="yellow">Reranker path › </Text>
@@ -864,6 +909,9 @@ const HintRow = memo(function HintRow({
   clarifying: boolean;
   chipFocus: 'web' | 'corpus' | 'output' | null;
 }): React.ReactElement {
+  if (field === 'effort') {
+    return <Text dimColor>←/→ choose · ⏎ apply · Esc cancel</Text>;
+  }
   if (field === 'web' || field === 'scan' || field === 'output' || field === 'model' || field === 'reranker') {
     return <Text dimColor>⏎ save (empty to clear) · Ctrl+U clear · Esc cancel</Text>;
   }
