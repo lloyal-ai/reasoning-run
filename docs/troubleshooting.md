@@ -84,6 +84,10 @@ Note: **`--gpu metal` is rejected** — Metal is used automatically on Apple Sil
 
 ---
 
-## Windows-specific failures
+## Windows
 
-> **TODO(confirm):** Windows-specific failure modes (and the supported GPU backend on Windows) are not yet documented. Confirm before publish — do not guess. Linux + CUDA/Vulkan and macOS (Metal automatic on Apple Silicon; x64 is CPU-only) are the surfaces verified against v0.5.1 source.
+Windows is supported. Select a GPU backend explicitly with `--gpu cuda` (NVIDIA) or `--gpu vulkan` (other GPUs) — see [Choosing a GPU](./guides/models-and-gpu.md#choosing-a-gpu). A few Windows-specific notes:
+
+- Like every platform, a backend that can't load **falls back to CPU silently** — pass `--gpu` (or set `LLOYAL_NO_FALLBACK=1`) to make it fail loud instead (see [It runs on the CPU](#it-runs-on-the-cpu-instead-of-my-gpu) above).
+- **backend-pack is Linux + CUDA only** — it isn't offered on Windows. If `--gpu cuda` won't load on a newer or datacenter-class NVIDIA card whose architecture the default build doesn't cover, try `--gpu vulkan`.
+- **Node ≥ 24** is required, same as every platform (see the top of this page).

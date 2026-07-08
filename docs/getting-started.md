@@ -8,17 +8,14 @@ reasoning.run is a private reasoner for your terminal: it runs a small team of r
 
 - **Node.js ≥ 24 — required.** This is a hard floor. On an older Node the CLI fails to start with a cryptic error; check with `node --version` and upgrade first if you're below 24. (If you hit this, see [Troubleshooting](./troubleshooting.md).)
 - **~3 GB free disk and a network connection for the first run only.** The first run downloads the default models (~3 GB, see [First run](#first-run) below). Once they're cached, every later run is fully offline — no network needed.
+- **Memory: 16 GB recommended · ~8 GB minimum** (default 4B model). The default setup — a 4B model with a shared 32K-token context — runs comfortably at 16 GB (the demo is a 16 GB MacBook), and can run in as little as ~8 GB; below that isn't tested, and larger models or context windows need more. With a discrete GPU the model loads into VRAM (the default needs only a few GB); otherwise it uses system RAM.
 
-> **TODO(confirm):** minimum RAM floor. The README demo runs on a 16 GB MacBook; the smallest supported memory footprint isn't yet documented. Do not assume a lower bound until confirmed.
-
-> **TODO(confirm):** Windows support and which GPU backend it uses. macOS and Linux are covered below; Windows specifics (whether it's supported, and CUDA vs Vulkan) are not yet officially stated.
-
-**Operating systems and GPUs (what's known today):**
+**Operating systems and GPUs:**
 
 - **macOS on Apple Silicon (M-series):** the GPU (Metal) is used **automatically** — there is no flag to set, and `--gpu metal` is deliberately rejected.
 - **macOS on Intel (x64):** runs CPU-only.
 - **Linux:** select a GPU backend with `--gpu cuda` or `--gpu vulkan` (or omit it for the platform binary's built-in backend). To run on datacenter / frontier-class cards, see the backend-pack path in the [models & GPU guide](./guides/models-and-gpu.md).
-- **Windows:** see the TODO above.
+- **Windows:** supported — select a GPU backend with `--gpu cuda` (NVIDIA) or `--gpu vulkan` (other GPUs), or omit it for the platform binary's built-in backend. As on Linux, use the backend-pack path for datacenter-class CUDA cards ([models & GPU guide](./guides/models-and-gpu.md)).
 
 The flags, env vars, and their precedence live in one place — the [CLI reference](./cli-reference.md#flags). This page doesn't restate them.
 
