@@ -1,6 +1,16 @@
 # reasoning.run
 
-A private reasoner for your terminal. Direct conversation or grounded multi-agent research, GPU-native and fully local. No API keys, no inference servers. Open source (MIT).
+[![npm](https://img.shields.io/npm/v/reasoning.run)](https://www.npmjs.com/package/reasoning.run)
+[![downloads](https://img.shields.io/npm/dw/reasoning.run)](https://www.npmjs.com/package/reasoning.run)
+[![license](https://img.shields.io/npm/l/reasoning.run)](LICENSE)
+[![node](https://img.shields.io/node/v/reasoning.run)](package.json)
+[![CI](https://github.com/lloyal-ai/reasoning-run/actions/workflows/ci.yml/badge.svg)](https://github.com/lloyal-ai/reasoning-run/actions/workflows/ci.yml)
+
+Run the model in your own process and fork agents from one shared context — 10 GLM-5.2
+agents decode in a single `llama_decode` per step, for about the GPU compute of one.
+
+A private reasoner for your terminal — direct chat or grounded multi-agent research,
+GPU-native and fully local. No API keys, no inference servers. MIT.
 
 ```
 npx reasoning.run
@@ -9,25 +19,78 @@ npx reasoning.run
 Then type a research question.
 
 <p>
-  <img src="assets/demo-readme.gif" alt="reasoning.run: clarifying questions → plan approval → 5 research agents in parallel → synthesized report" width="100%">
+  <img src="assets/demo-glm52-10agents.gif" alt="reasoning.run: 10 GLM-5.2 agents forked from one shared context, fanning out across a research task in a single terminal" width="100%">
   <br>
-  <em>Qwen3.5 4B + Qwen3 0.6B reranker · 5 parallel agents · shared 32K context · fully offline on M2 MacBook Pro 16 GB</em>
+  <em>GLM-5.2 (Unsloth UD-IQ2_M 2-bit, ~239 GB) · 10 agents forked from one shared context · one <code>llama_decode</code> per step · one box (2× B200, rented by the hour) · a real deep-research task, end to end through synthesis</em>
 </p>
 
 > Built with **[HDK](https://hdk.lloyal.ai/)** — Lloyal's Harness Development Kit. An in-app intelligence runtime for local-first apps: models, agents, tools, and retrieval in one import — no model server, no API keys.
 
-**Empirically:** 5 research agents running concurrently in a shared 32K-token context window, Qwen3.5-4B as the LLM, on a MacBook Pro M2 (16 GB unified memory). No GPU server, no API keys, no inference fees. Every token is decoded on the device that asked the question.
+## Requirements
+
+- **Node ≥ 24.** Enforced via `engines`; Node 20/22 won't install.
+- **Apple Silicon M2+ with ≥ 10 GB free memory** for the default local models — Metal is automatic, no flags.
+- **x64 needs AVX2** (Intel Haswell / 2013+, or AMD Zen). Linux, macOS, and native Windows are all supported — Windows + CUDA is a tested path here (it's the daily dev box: Ryzen + RTX 3080).
+- **First run downloads ~3 GB** of default models into `~/.cache/lloyal/models/`. After that it's local.
+- **GLM-5.2-class models want a datacenter GPU.** The run above used a 2-bit Unsloth quant (~239 GB) on one box; a single 288 GB card (a B300) fits it, or a pair of smaller cards. Rent one by the hour when you need it — nothing about the harness changes between your laptop and the datacenter.
 
 ## What you get
 
+<p>
+  <img src="assets/demo-readme.gif" alt="reasoning.run: clarifying questions → plan approval → 5 research agents in parallel → synthesized report, running fully offline on a MacBook" width="100%">
+  <br>
+  <em>The fully-local path: Qwen3.5 4B + Qwen3 0.6B reranker · 5 parallel agents · shared 32K context · offline on an M2 MacBook Pro 16 GB</em>
+</p>
+
 - **Plan, edit, run.** A small planner decomposes your question into research tasks. You see the plan in a TUI editor — navigate with ↑↓, edit a task with ⏎, add/delete/reorder with `A`/`D`/`⇧↑↓`. Press START on a plan you actually agree with. Nothing runs until you say so.
-- **5 agents in one context window.** HDK's [Continuous Context](https://docs.lloyal.ai/under-the-hood/continuous-context-spine) lets agents share GPU KV state, not strings — five research agents fit inside a single 32K-token budget on a 16 GB MacBook. Decoded in-process, no API calls, no inference server.
+- **Many agents in one context window.** HDK's [Continuous Context](https://docs.lloyal.ai/under-the-hood/continuous-context-spine) lets agents share GPU KV state, not strings — five research agents fit inside a single 32K-token budget on a 16 GB MacBook, and the same mechanism scales to ten frontier agents on a datacenter box. Decoded in-process, on the device that asked.
 - **Retrieval inside the loop.** Each agent searches, fetches, and reranks chunks *during* generation via HDK's [RIG](https://docs.lloyal.ai/build-an-app/sources-and-retrieval) primitives — keyless web search by default (Tavily optional), local markdown for corpus. Adaptive tool use, multi-hop reasoning.
 - **Warm follow-ups.** Subsequent queries in the same session reuse the trunk's KV. The planner runs instantly; agents fork from a context that already remembers the prior turn.
 - **Hot model swap.** `/model <path>` rebuilds the harness against a new `.gguf` mid-session. Test against different model sizes and quants in seconds, same process.
 - **Bundled output per query.** `report.md` (synth answer) + `annexure-N.md` (each research agent's full report) on disk. Grep, diff, share.
 
 First run downloads a Qwen3.5-4B LLM and Qwen3 reranker (~3 GB total, cached in `~/.cache/lloyal/models/`). After that it's all local.
+
+## Why the 10th agent is ~free
+
+The shared context — system prompt, tool schemas, and the roster of who's covering what — is decoded **once** into the KV cache.
+
+Spawning agents two through ten is a `seq_cp`: it walks the shared cells and sets one more owner bit on each. No new cells, no buffer copy, zero decode or attention compute — a single physical cell can carry many owners at once.
+
+On every generation step, all live agents decode in **one** `llama_decode`, not ten. The GPU sees token rows each tagged with the agent that owns it, not an "N sequences" dimension — so dispatch count is O(1) in the number of agents.
+
+So you pay for the frontier model once and the shared context once. Per-step wall-time scales with how full the cache is, not with how many agents are in it; two agents and ten decode at the same per-step speed.
+
+The honest floor: concurrency is free on compute and **paid in space**. Every agent that diverges grows its own private tail in the KV cache, so the ceiling on how wide you fan out is cache size, not FLOPs. We turned a compute multiplier into a memory budget.
+
+Full mechanism, traced line-by-line to the inference kernel: <!-- PENDING: article URL -->
+
+### Prior art
+
+Forking a shared KV prefix isn't our invention. SGLang's `fork` and RadixAttention have served shared-prefix workloads in production, and a line of research explores the same physics — decode a prefix once, let many continuations attend to it without re-decoding. What reasoning.run composes differently: the runtime lives inside your Node process (no model server to stand up), forks are governed by structured-concurrency scopes with per-agent policies, and all live agents decode in one lockstep `llama_decode` per step. The primitive is known; the in-process, harness-side packaging is the point.
+
+## The part you can check
+
+We'd rather you verify than take our word for it.
+
+- **A full research run, end to end.** A GLM-5.2 fan-out on one box, published with the synthesized report, every agent's annexure, the session trace (`trace-*.jsonl`), and the exact config — so you can replay the fan-out, watch the corrections happen when a source turns out to be about the wrong thing, and check the cost model against cache occupancy yourself. <!-- PENDING: run-bundle URL -->
+- **The 10-agent run, as it happened.** The asciinema cast of the ten columns going live, plus the receipt: 2× B200 rented on RunPod, ~82-minute session, ≈ $16. For this one we publish the cast and the cost, not a per-agent trace — it was captured for the visual and the step-level JSONL wasn't retained. <!-- PENDING: run-bundle URL -->
+
+A note on the policy behind the numbers: breadth is cheap here and depth is where the cost lives, so we fan out wide on discovery and keep each agent's private reasoning tail as small as the task allows. Concurrency is free on compute; you pay for it in KV space, and the ceiling is how much cache fits on the box.
+
+## FAQ
+
+**Is this just an API wrapper?**
+No. The model runs in-process through [`@lloyal-labs/lloyal.node`](https://www.npmjs.com/package/@lloyal-labs/lloyal.node), a llama.cpp Node binding — no server, no network hop, no per-token bill. Every token is decoded on the machine that asked the question. Nothing leaves the process unless a tool (like web search) deliberately reaches out.
+
+**Do I need the CUDA toolchain, or to compile anything?**
+No. `npx reasoning.run` pulls a prebuilt binary. On macOS, Metal is automatic. On Linux or Windows with an NVIDIA GPU, pass `--gpu cuda`; the first CUDA run can fetch a signed backend pack (you get a Download / Not now prompt). No `nvcc`, no local build step.
+
+**What hardware do I need for GLM-5.2?**
+For the default Qwen models: an M2+ Mac with ≥ 10 GB free memory, or an AVX2 x64 box. GLM-5.2 is large — the 10-agent run used a 2-bit Unsloth quant (~239 GB) on datacenter GPUs, and a single 288 GB card fits it. Rent one by the hour. Smaller and more heavily quantized GLM variants run on less.
+
+**How is this different from node-llama-cpp, an SGLang server, or Ollama?**
+Different job — and we build on the same layer several of them do. `node-llama-cpp` (and llama.cpp) give you a model in a process; reasoning.run adds the agent orchestration, KV-forking, retrieval-in-the-loop, and TUI on top. Ollama is an excellent local model *server* you call over HTTP; here there is no server — the model lives inside the harness so agents can share and fork one KV context. SGLang is a production serving stack with its own `fork`/RadixAttention: a different deployment shape (a server tier your app calls) built for a different scale. If you want a local model endpoint, reach for those. If you want to write a multi-agent application with the model *inside* it, that's this.
 
 ## Configuration
 
