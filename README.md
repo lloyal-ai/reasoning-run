@@ -73,8 +73,8 @@ Forking a shared KV prefix isn't our invention. SGLang's `fork` and RadixAttenti
 
 We'd rather you verify than take our word for it.
 
-- **A full research run, end to end.** A GLM-5.2 fan-out on one box, published with the synthesized report, every agent's annexure, the session trace (`trace-*.jsonl`), and the exact config — so you can replay the fan-out, watch the corrections happen when a source turns out to be about the wrong thing, and check the cost model against cache occupancy yourself. <!-- PENDING: run-bundle URL -->
-- **The 10-agent run, as it happened.** The asciinema cast of the ten columns going live, plus the receipt: 2× B200 rented on RunPod, ~82-minute session, ≈ $16. For this one we publish the cast and the cost, not a per-agent trace — it was captured for the visual and the step-level JSONL wasn't retained. <!-- PENDING: run-bundle URL -->
+- **A full research run, end to end — the 6-agent run.** A six-agent GLM-5.2 fan-out on one box, published with the synthesized report, every agent's annexure, the session trace (`trace-*.jsonl`), and the exact config. This is the run with the complete step-level trace — replay the fan-out, watch the corrections happen when a source turns out to be about the wrong thing, and check the cost model against cache occupancy yourself. <!-- PENDING: run-bundle URL -->
+- **The 10-agent run — asciinema capture + cost receipt.** The cast of the ten columns going live, plus the receipt: 2× B200 rented on RunPod (360 GB total as provisioned), ~82-minute session, ≈ $16. For this run the checkable artifacts are the capture and the cost — there is no per-agent trace; it was captured for the terminal recording and the step-level JSONL wasn't retained. <!-- PENDING: run-bundle URL -->
 
 A note on the policy behind the numbers: breadth is cheap here and depth is where the cost lives, so we fan out wide on discovery and keep each agent's private reasoning tail as small as the task allows. Concurrency is free on compute; you pay for it in KV space, and the ceiling is how much cache fits on the box.
 
