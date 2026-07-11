@@ -1,0 +1,75 @@
+{
+  "version": "3.1.1",
+  "source": "channel",
+  "manifest": {
+    "archive": {
+      "file": "linux-x64-dl.tar.zst",
+      "sha256": "14ca2dad74b83d588ebee244da76eb32b87f33725f3deae6e20ce011e5dff6e5",
+      "sizeBytes": 124765313
+    },
+    "archs": {
+      "real": [
+        "86",
+        "89",
+        "100a",
+        "120a",
+        "121a"
+      ],
+      "virtual": [
+        "50",
+        "61",
+        "70",
+        "75",
+        "80",
+        "90"
+      ]
+    },
+    "cudaToolkit": "12.9",
+    "files": {
+      "libggml-base.so": "4b395045aedc75a67132025e2515908e9b05c27af772590a4c19593b1b74eef1",
+      "libggml-base.so.0": "4b395045aedc75a67132025e2515908e9b05c27af772590a4c19593b1b74eef1",
+      "libggml-base.so.0.14.0": "4b395045aedc75a67132025e2515908e9b05c27af772590a4c19593b1b74eef1",
+      "libggml-cpu-alderlake.so": "ad3e87f37090a18d1d924e936d9667e37f07b3fd9a5e4fda5a148055924be5cd",
+      "libggml-cpu-cannonlake.so": "dacddded03ed7ecbedada34473631267fc2990535bcbab739df3dbb089edafdc",
+      "libggml-cpu-cascadelake.so": "473b2ed0c55663dc4bac9d751cc48f8751aa1e320f104b021c660fe6fab4328e",
+      "libggml-cpu-cooperlake.so": "8a18bec28833724ea699ed5ccdf2fd07f8293cee947c2e049c6ad23afc68ea6c",
+      "libggml-cpu-haswell.so": "a490cd21a04d991ffdc7dcfa99a1bef535af78db52525b31e81da326df43d460",
+      "libggml-cpu-icelake.so": "d1d21a921667dea14815a196cef47d97cea3c7ceb28b7b4a9b8ff948101b07b1",
+      "libggml-cpu-ivybridge.so": "c0c6afb25ed2f8863991a219a5fa19bbf198b390651abc2cf1c31730eb5401fd",
+      "libggml-cpu-piledriver.so": "4d5c73c1fb50984461793dced81f9e23aaf8fbd14bdeff5292a6d99c7fd7904d",
+      "libggml-cpu-sandybridge.so": "e94e0968d88d212dad4724ea6719dee20e2b19c11ad87f03b4357d7dec417b3e",
+      "libggml-cpu-sapphirerapids.so": "47e5ea5a98d40bc5e17bef63c24707c7563dd275f987f05f01291800d5cc47f1",
+      "libggml-cpu-skylakex.so": "81f10ae3d1119beffa6a515c8f9ba805ea2ae009694401d287f744ef4856f79d",
+      "libggml-cpu-sse42.so": "bbc7f55c42847b98beb54baa8c3ed6d6484b62dfb66b40d972257cb7939e4218",
+      "libggml-cpu-x64.so": "34a13ebf1d08eaaa799dfdd7ce3bd6e07b188a585a542841712c120f76d06526",
+      "libggml-cpu-zen4.so": "3b91a60cd228b270d116f1e83c1d06aa4aaca94ed2107bf484da6d8643febc0f",
+      "libggml-cuda.so": "8def49cfdc4982295c56f67408ac81897a231fddc9d6faf644352bc819991ccc",
+      "libggml.so": "18090d8aaa7b6cd60708a07a69021bd01130f6a3f793a6ef428c95b619b8d869",
+      "libggml.so.0": "18090d8aaa7b6cd60708a07a69021bd01130f6a3f793a6ef428c95b619b8d869",
+      "libggml.so.0.14.0": "18090d8aaa7b6cd60708a07a69021bd01130f6a3f793a6ef428c95b619b8d869",
+      "libllama-common.so": "2f66fe8a41415f2266e2033c15e0900a6d415a3a1242fab9cdcd785bfc267243",
+      "libllama-common.so.0": "2f66fe8a41415f2266e2033c15e0900a6d415a3a1242fab9cdcd785bfc267243",
+      "libllama-common.so.0.0.1": "2f66fe8a41415f2266e2033c15e0900a6d415a3a1242fab9cdcd785bfc267243",
+      "libllama.so": "0c890e29625de4b6c357e12c6440f06b32a30b441791bddf1103f94d32c5bd74",
+      "libllama.so.0": "0c890e29625de4b6c357e12c6440f06b32a30b441791bddf1103f94d32c5bd74",
+      "libllama.so.0.0.1": "0c890e29625de4b6c357e12c6440f06b32a30b441791bddf1103f94d32c5bd74",
+      "libmd4c-html.so": "2f3819857a12bd04d91224659478d3b2ddf389590e1b9e1b0a0b43ee67001507",
+      "libmd4c-html.so.0": "2f3819857a12bd04d91224659478d3b2ddf389590e1b9e1b0a0b43ee67001507",
+      "libmd4c-html.so.0.5.2": "2f3819857a12bd04d91224659478d3b2ddf389590e1b9e1b0a0b43ee67001507",
+      "libmd4c.so": "e370878738c2f6224220566775068ff8e2be8f718ac6877c7ff4326bd51082bc",
+      "libmd4c.so.0": "e370878738c2f6224220566775068ff8e2be8f718ac6877c7ff4326bd51082bc",
+      "libmd4c.so.0.5.2": "e370878738c2f6224220566775068ff8e2be8f718ac6877c7ff4326bd51082bc",
+      "lloyal.node": "61d556add489003ea62069c2f0d6c8a991a4f74f193b3625102550ab506603ba"
+    },
+    "llamaCppTag": "# llama.cpp version for integration tests\n# Last updated: 2026-06-10\n# Format: git commit hash or tag\nb9581",
+    "name": "lloyal.node-backend-pack",
+    "platform": "linux-x64-dl",
+    "requiredCudaRuntime": "12.9",
+    "runtimeArchive": {
+      "file": "runtime-cuda12.9.tar.zst",
+      "sha256": "6a3ea7e2ac81d1ddc0522512cd7caee96f432f456a269c42d3ddd535a3c38826",
+      "sizeBytes": 1492859892
+    },
+    "version": "3.1.1"
+  }
+}
