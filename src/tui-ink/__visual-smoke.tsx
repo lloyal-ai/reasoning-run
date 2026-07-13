@@ -7,7 +7,7 @@
  */
 
 import { main, createSignal, sleep, spawn, call, each } from 'effection';
-import { createBus } from './event-bus';
+import { createBus } from '@lloyal-labs/binding';
 import { render } from './render';
 import type { WorkflowEvent } from './events';
 import type { Command } from './commands';
