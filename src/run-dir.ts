@@ -1,14 +1,14 @@
 /**
  * Per-query artifact sink.
  *
- * Subscribes to the WorkflowEvent stream forwarded by harness.ts's drain
+ * Subscribes to the WorkflowEvent stream forwarded by main.ts's drain
  * and writes:
  *   <output-dir>/<ISO-timestamp>/
  *     report.md          — synth/passthrough answer with metadata + annexure index
  *     annexure-N.md      — one per research agent's `report` tool result
  *
  * Trace.jsonl is NOT this sink's concern. Trace is session-scoped: opened
- * once at boot in harness.ts, captures every query (including warm follow-
+ * once at boot in main.ts, captures every query (including warm follow-
  * ups), closed at process exit.
  */
 

@@ -1,8 +1,8 @@
 /**
- * UI → harness.ts command boundary.
+ * UI → main.ts command boundary.
  *
  * The Ink component tree dispatches commands through the `useCommand`
- * hook; harness.ts drains them from an Effection Signal and runs the
+ * hook; main.ts drains them from an Effection Signal and runs the
  * corresponding Operation (runPlanner, runResearch, saveConfig, ...).
  *
  * Keep the union small and explicit. No generic "send arbitrary event"
@@ -27,7 +27,7 @@ export type Command =
   | { type: 'set_effort'; effort: 'low' | 'medium' | 'high' | 'ultra' }
   | { type: 'set_model_path'; path: string }
   | { type: 'set_reranker_path'; path: string }
-  // GPU backend variant (persisted as model.gpu; harness.ts restarts the boot so
+  // GPU backend variant (persisted as model.gpu; main.ts restarts the boot so
   // ctx + reranker reload on the new backend). Values mirror lloyal.node's
   // GpuVariant; 'default' = the platform binary's built-in backend.
   | { type: 'set_gpu'; gpu: 'default' | 'cuda' | 'vulkan' }
@@ -38,13 +38,13 @@ export type Command =
   | { type: 'decline_backend_pack' }
   | { type: 'toggle_participation'; name: string }
   // Escape hatch: interrupt the in-flight run (planner / research / synth) and
-  // return to the composer. Handled in harness.ts's command loop by halting the
+  // return to the composer. Handled in main.ts's command loop by halting the
   // spawned run Task (Effection halt tears down the run scope + cancels any
   // parked tool fetch via cancellable-fetch's scope-signal) and sending
   // `ui:composer`. No-op when no run is active. Never kills the loop/process.
   | { type: 'stop' }
   // Graceful "Wrap up": drain the in-flight run to a fast best-effort answer
-  // instead of aborting it. Handled in harness.ts by sending the WindDown signal
+  // instead of aborting it. Handled in main.ts by sending the WindDown signal
   // (NOT halting) — the pool stops spawning, reaps active agents, lets in-flight
   // tools settle, and folds the cohort into a recovered answer + synth. No-op
   // when no run is active. Distinct from `stop` (abort → composer).

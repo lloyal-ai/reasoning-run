@@ -254,7 +254,7 @@ export interface AppEntitlement {
  *  Joins the app's local manifest with its signed catalog metadata
  *  (title/iconUrl/entitlements from apps.lloyal.ai) so the Settings drawer
  *  can render the app card, its tools, its config schema, and its current
- *  stored config. Built engine-side by harness.ts and forwarded via the
+ *  stored config. Built engine-side by main.ts and forwarded via the
  *  `apps:state` event; the reducer drops it whole into `AppState.apps`. */
 export interface AppDescriptor {
   /** manifest.name (e.g. "web") — routing key + config-store key. */
@@ -348,7 +348,7 @@ export interface AppState {
   composerPrefill: string;
   /** Set when the planner asks clarifying questions. Drives the clarifying
    *  UI (questions stay visible above the composer while the user types
-   *  the answer) and carries the original query so harness.ts can re-run the
+   *  the answer) and carries the original query so main.ts can re-run the
    *  planner with the Q&A as context. */
   clarifyContext: {
     originalQuery: string;
@@ -377,7 +377,7 @@ export interface AppState {
   /** Per-app participation in the next query, keyed by `manifest.name`.
    *  `true` = included; `false` = configured-but-excluded (user opted out
    *  for this session); missing key = treat as included by default. The
-   *  filter is applied at submit time in harness.ts; `runQuery`'s
+   *  filter is applied at submit time in main.ts; `runQuery`'s
    *  `appFilter` opt carries the included-names array. Reset to `true`
    *  on reconfigure (`set_app_config`) — a config
    *  change is a strong signal of intent to use the app. */

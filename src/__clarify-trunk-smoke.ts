@@ -9,7 +9,7 @@
  *      format committed to session.trunk on every clarify round, so it
  *      gets direct unit coverage (numbering, joining, empty/single/many).
  *
- *   2. Structural assertions on harness.ts and pipeline.ts — the command-loop
+ *   2. Structural assertions on main.ts and harness.ts — the command-loop
  *      rewrite is not testable end-to-end without booting llama.cpp, but
  *      its shape is observable from source. We assert that:
  *       - the legacy `Prior clarification exchange:` qa block is GONE;
@@ -21,7 +21,7 @@
  *       - `pendingPlan` carries the new `latestUserInput` field;
  *       - `accept_plan` threads `commitInput: pendingPlan.latestUserInput`
  *         to runResearchPlan;
- *       - `RunResearchPlanOpts.commitInput` exists in pipeline.ts and the
+ *       - `RunResearchPlanOpts.commitInput` exists in harness.ts and the
  *         final commit line uses `opts.commitInput ?? query`.
  *
  * The structural layer is a regression guard: any future refactor that
@@ -50,7 +50,7 @@ function check(label: string, fn: () => void): void {
 // ── Layer 1: helper unit tests ─────────────────────────────────────
 
 // Re-implement the helper here for direct testing — keeping it in sync
-// with harness.ts. (Importing from harness.ts would pull in the entire boot
+// with main.ts. (Importing from main.ts would pull in the entire boot
 // sequence as a transitive side-effect via the top-level `main(...)`
 // call. The helper is a pure 4-line function — a faithful copy is the
 // least-invasive way to unit-test it.)
@@ -99,30 +99,30 @@ check("formatClarifyAsAssistantMsg: questions with embedded newlines round-trip"
   assert.match(out, /2\. Q with\nnewline/);
 });
 
-// ── Layer 2: structural assertions on harness.ts ──────────────────────
+// ── Layer 2: structural assertions on main.ts ──────────────────────
 
 // Smokes run from the reasoning.run package root (see `npm run smoke`).
-const mainSrc = fs.readFileSync(path.join(process.cwd(), "src/harness.ts"), "utf8");
+const mainSrc = fs.readFileSync(path.join(process.cwd(), "src/main.ts"), "utf8");
 const harnessSrc = fs.readFileSync(
-  path.join(process.cwd(), "src/pipeline.ts"),
+  path.join(process.cwd(), "src/harness.ts"),
   "utf8",
 );
 
-check("harness.ts: legacy `Prior clarification exchange:` qa block is GONE", () => {
+check("main.ts: legacy `Prior clarification exchange:` qa block is GONE", () => {
   assert.ok(
     !mainSrc.includes("Prior clarification exchange:"),
     "Found legacy prompt-prose qa block — the rewrite did not remove it.",
   );
 });
 
-check("harness.ts: legacy `User response:` qa block prefix is GONE", () => {
+check("main.ts: legacy `User response:` qa block prefix is GONE", () => {
   assert.ok(
     !mainSrc.includes("User response: ${cmd.answer}"),
     "Found legacy prompt-prose qa block — the rewrite did not remove it.",
   );
 });
 
-check("harness.ts: formatClarifyAsAssistantMsg defined + called from 3 sites", () => {
+check("main.ts: formatClarifyAsAssistantMsg defined + called from 3 sites", () => {
   // Q1.5: 1 definition + 3 call sites (auto-submit clarify, submit_query→clarify,
   // submit_clarification→clarify). change_mode→clarify deliberately skips the
   // commit per Q1.5 (non-conversational re-plan; documented edge).
@@ -134,17 +134,17 @@ check("harness.ts: formatClarifyAsAssistantMsg defined + called from 3 sites", (
   );
 });
 
-check("harness.ts: first-round clarify uses session.commitTurn (atomic)", () => {
+check("main.ts: first-round clarify uses session.commitTurn (atomic)", () => {
   // First-round emissions (auto-submit + submit_query) bootstrap the trunk
   // with an atomic (query, formattedQs) pair via commitTurn cold path.
   const occurrences = mainSrc.match(/session\.commitTurn\(/g) ?? [];
   assert.ok(
     occurrences.length >= 2,
-    `expected ≥2 session.commitTurn calls in harness.ts (auto-submit + submit_query first-round); got ${occurrences.length}`,
+    `expected ≥2 session.commitTurn calls in main.ts (auto-submit + submit_query first-round); got ${occurrences.length}`,
   );
 });
 
-check("harness.ts: submit_clarification uses prefillUser before runQuery", () => {
+check("main.ts: submit_clarification uses prefillUser before runQuery", () => {
   // Q1.5 core: the user's clarify answer must enter trunk BEFORE planner #2
   // forks, so the planner's KV inherits it.
   assert.ok(
@@ -153,7 +153,7 @@ check("harness.ts: submit_clarification uses prefillUser before runQuery", () =>
   );
 });
 
-check("harness.ts: submit_clarification clarify result uses prefillAssistant", () => {
+check("main.ts: submit_clarification clarify result uses prefillAssistant", () => {
   // When planner #2 emits clarify, close the dangling user-side via
   // prefillAssistant (not commitTurn, which would re-emit cmd.answer).
   assert.ok(
@@ -162,7 +162,7 @@ check("harness.ts: submit_clarification clarify result uses prefillAssistant", (
   );
 });
 
-check("harness.ts: pendingPlan carries clarifyExchanged field", () => {
+check("main.ts: pendingPlan carries clarifyExchanged field", () => {
   assert.ok(
     mainSrc.includes("clarifyExchanged: boolean;"),
     "pendingPlan type missing `clarifyExchanged: boolean;` field",
@@ -176,14 +176,14 @@ check("harness.ts: pendingPlan carries clarifyExchanged field", () => {
   );
 });
 
-check("harness.ts: legacy latestUserInput is GONE", () => {
+check("main.ts: legacy latestUserInput is GONE", () => {
   assert.ok(
     !mainSrc.includes("latestUserInput"),
     "latestUserInput should be removed in Q1.5 (replaced by clarifyExchanged + prefillUser/prefillAssistant split)",
   );
 });
 
-check("harness.ts: accept_plan threads userSidePending to runResearchPlan", () => {
+check("main.ts: accept_plan threads userSidePending to runResearchPlan", () => {
   // accept_plan snapshots pendingPlan into `acceptedPlan` before clearing it
   // and starting the run in a child fiber (Stop escape hatch), then threads
   // the clarify flag from that snapshot. Match the snapshot var name.
@@ -193,36 +193,36 @@ check("harness.ts: accept_plan threads userSidePending to runResearchPlan", () =
   );
 });
 
-// ── Layer 2b: structural assertions on pipeline.ts ──────────────────
+// ── Layer 2b: structural assertions on harness.ts ──────────────────
 
-check("pipeline.ts: RunResearchPlanOpts declares userSidePending field", () => {
+check("harness.ts: RunResearchPlanOpts declares userSidePending field", () => {
   assert.ok(
     /userSidePending\?:\s*boolean/.test(harnessSrc),
     "RunResearchPlanOpts missing `userSidePending?: boolean` field",
   );
 });
 
-check("pipeline.ts: legacy commitInput field is GONE", () => {
+check("harness.ts: legacy commitInput field is GONE", () => {
   assert.ok(
     !/commitInput\?:\s*string/.test(harnessSrc),
     "RunResearchPlanOpts.commitInput should be removed in Q1.5",
   );
 });
 
-check("pipeline.ts: research-completion commit branches on userSidePending", () => {
+check("harness.ts: research-completion commit branches on userSidePending", () => {
   // userSidePending=true  → prefillAssistant(answer)  (clarify path)
   // userSidePending=false → commitTurn(query, answer) (no-clarify path)
   assert.ok(
     /opts\.userSidePending/.test(harnessSrc),
-    "pipeline.ts research-completion commit must branch on opts.userSidePending",
+    "harness.ts research-completion commit must branch on opts.userSidePending",
   );
   assert.ok(
     /session\.prefillAssistant\(answer\)/.test(harnessSrc),
-    "pipeline.ts clarify-path branch must call session.prefillAssistant(answer)",
+    "harness.ts clarify-path branch must call session.prefillAssistant(answer)",
   );
   assert.ok(
     /session\.commitTurn\(query,\s*answer\)/.test(harnessSrc),
-    "pipeline.ts no-clarify branch must call session.commitTurn(query, answer)",
+    "harness.ts no-clarify branch must call session.commitTurn(query, answer)",
   );
 });
 

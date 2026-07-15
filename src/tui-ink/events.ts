@@ -1,7 +1,7 @@
 /**
  * Event union consumed by the Ink reducer.
  *
- * These mirror the StepEvent variants emitted by examples/deep-research/pipeline.ts
+ * These mirror the StepEvent variants emitted by examples/deep-research/harness.ts
  * (formerly in examples/deep-research/tui.ts) plus the AgentEvent stream coming
  * from @lloyal-labs/lloyal-agents. The harness continues to emit the same events
  * — only the rendering layer is replaced.
@@ -47,7 +47,7 @@ export type StepEvent =
       ctxTotal: number;
     }
   | { type: 'complete'; data: Record<string, unknown> }
-  // ── UI / config events driven by harness.ts ────────────────────────
+  // ── UI / config events driven by main.ts ────────────────────────
   | { type: 'config:loaded'; config: Config; origin: ConfigOrigin; path: string }
   | {
       type: 'config:updated';
@@ -105,13 +105,13 @@ export type StepEvent =
       runtimeSizeBytes: number;
       reasons: string[];
     }
-  // Per-query App participation toggle. Emitted by harness.ts in response to
+  // Per-query App participation toggle. Emitted by main.ts in response to
   // a `toggle_participation` Command from the Composer. The reducer flips
   // the bit in `state.participation[name]`. Pure UI state — no harness
-  // side effects; harness.ts derives `appFilter` from `state.participation`
+  // side effects; main.ts derives `appFilter` from `state.participation`
   // at submit time and threads it into runQuery / runResearchPlan.
   | { type: 'participation:toggled'; name: string }
-  // Installed-AgentApps snapshot for the Settings drawer. Emitted by harness.ts
+  // Installed-AgentApps snapshot for the Settings drawer. Emitted by main.ts
   // after boot completes AND after every registry enable/disable/config
   // change. The reducer drops it whole into `state.apps`. Display-only — the
   // catalog-metadata join (title/iconUrl/entitlements) is best-effort and

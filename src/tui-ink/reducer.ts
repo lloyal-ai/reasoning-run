@@ -21,7 +21,7 @@ import { shortPath } from './path-utils';
  *  nothing to seed here on a plain config load. The included-by-default set
  *  is the registry-enabled apps surfaced via `apps:state`; per-app intent is
  *  driven explicitly through `participation:toggled` (chip toggle) and
- *  `set_app_config` (configuring → harness.ts sets the bit + re-emits state).
+ *  `set_app_config` (configuring → main.ts sets the bit + re-emits state).
  *  Returns `prev` unchanged — kept as a function so config events have a
  *  single, named place to hook future participation policy. */
 function seedParticipation(
