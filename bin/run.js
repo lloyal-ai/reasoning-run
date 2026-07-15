@@ -7,7 +7,9 @@
  * (also invoked automatically on `npm publish` via prepublishOnly).
  */
 
-import("../dist/bundle.mjs").catch((err) => {
-  process.stderr.write(`Error: ${err && err.stack ? err.stack : err}\n`);
-  process.exit(1);
-});
+import("../dist/bundle.mjs")
+  .then((m) => m.runMain())
+  .catch((err) => {
+    process.stderr.write(`Error: ${err && err.stack ? err.stack : err}\n`);
+    process.exit(1);
+  });

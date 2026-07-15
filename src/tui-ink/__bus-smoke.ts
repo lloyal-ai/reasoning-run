@@ -5,7 +5,7 @@
  */
 
 import assert from 'node:assert';
-import { createBus } from './event-bus';
+import { createBus } from '@lloyal-labs/binding';
 
 function check(label: string, fn: () => void) {
   try {

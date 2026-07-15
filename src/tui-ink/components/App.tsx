@@ -4,7 +4,7 @@ import type { WorkflowEvent } from '../events';
 import type { ScrollbackItem } from '../state';
 import { useEventStream } from '../hooks/useEventStream';
 import { CommandContext, type CommandDispatch } from '../hooks/useCommand';
-import type { EventBus } from '../event-bus';
+import type { EventBus } from '@lloyal-labs/binding';
 import { Header } from './Header';
 import { FrozenAgentPanel } from './FrozenAgentPanel';
 import { Narrative } from './Narrative';

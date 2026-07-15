@@ -11,7 +11,7 @@ import { useEffect, useReducer } from 'react';
 import type { WorkflowEvent } from '../events';
 import { initialState, type AppState } from '../state';
 import { reduce } from '../reducer';
-import type { EventBus } from '../event-bus';
+import type { EventBus } from '@lloyal-labs/binding';
 
 export function useEventStream(
   bus: EventBus<WorkflowEvent>,

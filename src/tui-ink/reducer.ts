@@ -13,7 +13,7 @@ import type { AppState, AgentRuntime, TimelineItem, SourceMeta } from './state';
 import { initialState } from './state';
 import type { WorkflowEvent } from './events';
 import type { Config } from './config';
-import { shortPath } from './path-utils';
+import { shortPath } from './short-path';
 
 /** Seed/refresh `participation` from current config. The reducer holds NO
  *  per-app knowledge: apps default to included via the `!== false`

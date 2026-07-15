@@ -5,8 +5,14 @@
   "bin": {
     "reasoning.run": "bin/run.js"
   },
+  "exports": {
+    ".": "./src/main.ts",
+    "./protocol": "./src/protocol.ts",
+    "./state": "./src/state.ts"
+  },
   "files": [
     "bin",
+    "src",
     "dist",
     "LICENSE",
     "README.md"
@@ -21,6 +27,7 @@
   },
   "dependencies": {
     "@inkjs/ui": "^2.0.0",
+    "@lloyal-labs/binding": "^0.1.0",
     "@lloyal-labs/corpus-app": "https://apps.lloyal.ai/v1/bundles/lloyal__corpus-1.2.0.tgz",
     "@lloyal-labs/lloyal-agents": "^3.2.0",
     "@lloyal-labs/lloyal.node": "^3.1.0",
