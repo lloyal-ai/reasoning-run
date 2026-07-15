@@ -54,7 +54,7 @@ export interface Runner {
   /** `--findings-budget` cap (edge flag); undefined = default. */
   findingsMaxChars: number | undefined;
   /** 'oneshot' = non-TTY `--query`/JSONL (run once, no plan-review gate);
-   *  'interactive' = Ink or the Electron/wss bridge (the command loop). */
+   *  'interactive' = Ink or the fork-IPC / wss bridge (the command loop). */
   mode: "interactive" | "oneshot";
   /** The `--query` to auto-submit (interactive, first iteration) or run (oneshot). */
   initialQuery: string | undefined;

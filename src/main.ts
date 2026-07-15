@@ -14,7 +14,7 @@
  * (Ink / `ipc` / JSONL), sets `RunnerCtx`, and calls `harness`. The bin invokes it.
  *
  * TTY mode mounts an Ink TUI; JSONL / non-TTY runs the planner → research pipeline
- * once with the same event stream; the Electron bridge streams over the binding.
+ * once with the same event stream; the fork-IPC bridge streams over the binding.
  */
 
 import * as fs from "node:fs";
@@ -523,8 +523,8 @@ export function* harness(
   }
 
   // ── JSONL / --query scripted path ──────────────────────────
-  // Bridge mode (Electron) drives the interactive command loop below, so
-  // it skips this one-shot scripted path even though useInk is false.
+  // Bridge mode (a forked host over IPC) drives the interactive command loop
+  // below, so it skips this one-shot scripted path even though useInk is false.
   if (oneShot) {
     if (!runner.initialQuery) {
       throw new HarnessExit("Non-TTY mode requires --query.", 2);
@@ -1270,7 +1270,7 @@ export function* harness(
 // ── runMain — the Layer-2 edge runner ────────────────────────────
 //
 // The bin (`bin/run.js`) imports this module and calls `runMain()`. Importing
-// the module (e.g. Artifact importing `harness`) does NOT parse argv or boot —
+// the module (e.g. a host importing `harness`) does NOT parse argv or boot —
 // all of that lives inside `runMain`.
 
 export function runMain(): void {
@@ -1634,8 +1634,9 @@ export function runMain(): void {
       inkInstance = mod.render(uiChannel, (cmd) => commands.send(cmd), bootstrap);
       yield* ensure(() => { inkInstance?.unmount(); });
     } else if (bridgeMode) {
-      // Electron utilityProcess / forked child: bridge the EventBus + Command
-      // signal over the shipped headless interface (`@lloyal-labs/binding`).
+      // A forked child over IPC (e.g. an Electron utilityProcess): bridge the
+      // EventBus + Command signal over the shipped headless interface
+      // (`@lloyal-labs/binding`).
       const bootstrap: WorkflowEvent[] = [
         {
           type: "config:loaded",

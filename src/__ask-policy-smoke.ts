@@ -34,7 +34,7 @@ function check(label: string, fn: () => void): void {
   }
 }
 
-// Smokes run from the reasoning.run.desktop package root (see `npm run smoke`).
+// Smokes run from the reasoning.run package root (see `npm run smoke`).
 const harnessSrc = fs.readFileSync(path.join(process.cwd(), "src/harness.ts"), "utf8");
 const mainSrc = fs.readFileSync(path.join(process.cwd(), "src/main.ts"), "utf8");
 
