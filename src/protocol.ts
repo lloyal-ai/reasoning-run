@@ -3,12 +3,17 @@
  *
  * Its `WorkflowEvent` union (down) + `Command` union (up) — the two halves of
  * the headless interface `harness(ctx, events, commands)` speaks — plus the
- * config schema a runner resolves and hands the harness. A host or surface
+ * config *schema* a runner resolves and hands the harness. A host or surface
  * imports these to speak the protocol without depending on the UI.
+ *
+ * TYPES ONLY — this surface must stay `node:`-free so a browser/renderer can
+ * import it (Artifact's renderer reads the plan/event types here). The config
+ * *loaders* (`loadConfig`/`saveConfig`) deliberately stay runner-side in
+ * `./tui-ink/config` — they touch `node:fs`, and only the in-package runner
+ * (`runMain`) calls them.
  */
 export type { StepEvent, WorkflowEvent } from "./tui-ink/events";
 export type { Command } from "./tui-ink/commands";
-export { loadConfig, saveConfig } from "./tui-ink/config";
 export type {
   Config,
   ConfigSources,
