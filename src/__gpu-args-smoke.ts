@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENTRY = path.join(ROOT, 'bin', 'run.js');
 
-// The raw src/main.ts can't run under tsx (`.eta` imports only resolve via
+// The raw src/harness.ts can't run under tsx (`.eta` imports only resolve via
 // esbuild's --loader:.eta=text), so this smoke exercises the real bundle.
 // Build it first — esbuild is ~25ms, and CI runs smokes before its build
 // step, so the bundle may be stale or absent here.

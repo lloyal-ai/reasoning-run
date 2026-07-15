@@ -782,7 +782,7 @@ check('download:complete marks entry done', () => {
     { type: 'download:complete', id: 'llm' } as WorkflowEvent,
   ]);
   assert.equal(s.downloads[0].done, true);
-  // uiPhase stays 'downloading' — main.ts explicitly transitions to 'loading'
+  // uiPhase stays 'downloading' — harness.ts explicitly transitions to 'loading'
   assert.equal(s.uiPhase, 'downloading');
 });
 

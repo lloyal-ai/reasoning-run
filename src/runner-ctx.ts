@@ -1,8 +1,8 @@
 /**
  * The runner ↔ harness seam (reasoning.run-internal — NOT the platform contract).
  *
- * The Layer-2 *runner* (`runMain` in `main.ts`) sets `RunnerCtx`; the Layer-3
- * `harness(ctx, events, commands)` (also in `main.ts`) reads it. It is how
+ * The Layer-2 *runner* (`runMain` in `harness.ts`) sets `RunnerCtx`; the Layer-3
+ * `harness(ctx, events, commands)` (also in `harness.ts`) reads it. It is how
  * reasoning.run's own runner hands its harness the edge-shell concerns the
  * harness cannot own: the loaded runtime handles it doesn't create (the reranker
  * + the persistent wind-down / cancel signals), the live resolved config, config

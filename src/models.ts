@@ -8,7 +8,7 @@
  * `resolveModelPath` maps a configured value (CLI arg, env, harness.json,
  * or a catalog id) to a filesystem path. `downloadIfMissing` atomically
  * streams the catalog entry into the XDG cache; progress reporting is
- * pushed through a caller-supplied `onProgress` callback so main.ts can
+ * pushed through a caller-supplied `onProgress` callback so harness.ts can
  * route updates into Ink events.
  */
 

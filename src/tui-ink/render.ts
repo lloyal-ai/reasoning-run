@@ -2,7 +2,7 @@
  * Ink render entry — mounts the <App/> against an EventBus and a
  * command-dispatch callback.
  *
- *   main.ts: const instance = render(bus, (cmd) => commands.send(cmd));
+ *   harness.ts: const instance = render(bus, (cmd) => commands.send(cmd));
  *
  * The bus MUST be a buffering EventBus (`@lloyal-labs/binding`'s `createBus`) so events
  * sent between `render()` returning and React's useEffect firing aren't

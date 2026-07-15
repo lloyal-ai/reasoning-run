@@ -566,7 +566,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
   };
 
   // Effort slider (opened via /effort). Enter commits the picked tier; the
-  // set_effort handler in main.ts persists defaults.effort → harness.json and
+  // set_effort handler in harness.ts persists defaults.effort → harness.json and
   // echoes config:updated. Selecting `ultra` triggers the splash (which returns
   // focus to the query line on dismiss); the rest close straight back.
   const commitEffort = (tier: Effort): void => {
@@ -757,7 +757,7 @@ export const Composer = memo(function Composer({ state }: ComposerProps): React.
         <SourceChip
           label="Output dir"
           origin={outputOrigin}
-          // Effective destination — mirrors main.ts's `outputDir ?? cwd`
+          // Effective destination — mirrors harness.ts's `outputDir ?? cwd`
           // fallback. Shows the user where runs actually land, not just
           // what's configured.
           value={shortPath(state.config?.sources.outputDir || process.cwd())}

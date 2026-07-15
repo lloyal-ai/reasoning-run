@@ -7,7 +7,7 @@
  *   ←→ / Tab   switch between Download and Not now
  *   ⏎          confirm the focused pill
  *
- * Download → accept_backend_pack: main.ts streams the archive(s) through
+ * Download → accept_backend_pack: harness.ts streams the archive(s) through
  * the standard download UI, then boot continues on the pack.
  * Not now → decline_backend_pack: persists model.backendPack=false — the
  * offer never re-fires (re-enable by editing harness.json).

@@ -8,7 +8,7 @@
  * editors: it owns only local selection state and reports out via `onCommit` /
  * `onCancel`; the Composer does the `set_effort` dispatch and the splash. That
  * command persists `defaults.effort` to harness.json and echoes `config:updated`
- * (main.ts's set_effort handler), so the committed tier applies to every
+ * (harness.ts's set_effort handler), so the committed tier applies to every
  * subsequent query.
  *
  * Keyboard (matches the inline editors — Esc exits, Ctrl+C inert mid-control):

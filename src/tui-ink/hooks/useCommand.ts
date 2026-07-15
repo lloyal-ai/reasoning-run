@@ -2,7 +2,7 @@
  * React access to the command dispatch function.
  *
  * `render()` creates a React context carrying a `dispatch(cmd)` that
- * sends into the Effection Signal shared with main.ts. Components call
+ * sends into the Effection Signal shared with harness.ts. Components call
  * `const dispatch = useCommand()` and fire commands directly.
  */
 

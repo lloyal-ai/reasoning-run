@@ -1,7 +1,7 @@
 /**
  * Visual smoke test — drives the full TUI sequence from composer boot
  * through plan review, research, and back to composer, using synthetic
- * events. Mirrors what main.ts's command loop would emit.
+ * events. Mirrors what harness.ts's command loop would emit.
  *
  *   npx tsx src/tui-ink/__visual-smoke.tsx
  */
@@ -17,7 +17,7 @@ main(function* () {
   const bus = createBus<WorkflowEvent>();
   const commands = createSignal<Command, void>();
 
-  // Drain commands (a real main.ts would dispatch real work here).
+  // Drain commands (a real harness.ts would dispatch real work here).
   yield* spawn(function* () {
     for (const _cmd of yield* each(commands)) {
       void _cmd;
