@@ -362,6 +362,25 @@ const errorMessage = (err: unknown): string =>
 const errorStack = (err: unknown): string =>
   err instanceof Error ? (err.stack ?? err.message) : String(err);
 
+/**
+ * A oneShot precondition/abort the harness can't proceed past (missing --query,
+ * no source configured, a clarify it can't answer in non-TTY mode). Thrown rather
+ * than `process.exit`ed so `harness` stays a pure `Operation<void>` — killing the
+ * process is the runner's job, and an embedding host must not be torn down by the
+ * harness it hosts. `runMain` catches it, writes `message`, and exits `exitCode`;
+ * the Effection scope unwinds cleanly on the way out (teardowns run), which a bare
+ * `process.exit` would have skipped.
+ */
+class HarnessExit extends Error {
+  constructor(
+    message: string,
+    readonly exitCode: number,
+  ) {
+    super(message);
+    this.name = "HarnessExit";
+  }
+}
+
 // ── harness — the Layer-3 entrypoint (platform contract) ─────────
 //
 // Runs INSIDE a runtime substrate the runner established (RerankerCtx via
@@ -508,14 +527,13 @@ export function* harness(
   // it skips this one-shot scripted path even though useInk is false.
   if (oneShot) {
     if (!runner.initialQuery) {
-      process.stderr.write("Non-TTY mode requires --query.\n");
-      process.exit(2);
+      throw new HarnessExit("Non-TTY mode requires --query.", 2);
     }
     if (registry.enabled().length === 0) {
-      process.stderr.write(
-        "No source configured. Set TAVILY_API_KEY, pass --corpus <dir>, or store one in harness.json.\n",
+      throw new HarnessExit(
+        "No source configured. Set TAVILY_API_KEY, pass --corpus <dir>, or store one in harness.json.",
+        2,
       );
-      process.exit(2);
     }
     const wallStartMs = performance.now();
     const result = yield* runQuery(runner.initialQuery, session, {
@@ -525,10 +543,10 @@ export function* harness(
         startRunDir(runner.initialQuery!, runner.config().defaults.reasoningMode),
     });
     if (result.type === "clarify") {
-      process.stderr.write(
-        "Planner asked clarifying questions; non-TTY mode can't answer. Aborting.\n",
+      throw new HarnessExit(
+        "Planner asked clarifying questions; non-TTY mode can't answer. Aborting.",
+        2,
       );
-      process.exit(2);
     }
     if (result.type === "research_plan") {
       startRunDir(runner.initialQuery, runner.config().defaults.reasoningMode);
@@ -2063,6 +2081,10 @@ export function runMain(): void {
       iteration++;
     }
   }).catch((err: unknown) => {
+    if (err instanceof HarnessExit) {
+      process.stderr.write(`${err.message}\n`);
+      process.exit(err.exitCode);
+    }
     process.stderr.write(`Error: ${errorMessage(err)}\n${errorStack(err)}\n`);
     process.exit(1);
   });

@@ -10,9 +10,13 @@
  * owns the `SessionContext` lifetime, so a /model, /reranker or /gpu change
  * resolves the harness and the runner rebuilds on a fresh context.
  *
- * A served (B-host) runner would supply a trivial `Runner`: config from deploy
+ * When the served (B-host) placement lands, reasoning.run's OWN runner runs there
+ * too — the host instantiates `harness(...)` (the platform contract) and this same
+ * runner, in its served variant, supplies a trivial `Runner`: config from deploy
  * state, `saveConfig`/`reloadRuntime` ephemeral or rejected (the host
- * re-materialises the Session), no replay, `interactive`.
+ * re-materialises the Session), no replay, `interactive`. That path is NOT wired
+ * yet, so `RunnerCtx`/`Runner` stay deliberately unexported (no `./runner` subpath) —
+ * today `runMain` (edge/CLI) is the only runner, and it sits in this same package.
  */
 import { createContext, type Signal } from "effection";
 import type { Config } from "./tui-ink";
