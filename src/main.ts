@@ -1500,8 +1500,9 @@ export function runMain(): void {
   }
 
   main(function* () {
-    // The Electron utilityProcess host sets RR_BRIDGE — the harness streams its
-    // WorkflowEvents over process.parentPort instead of mounting Ink/JSONL.
+    // A host that forked this process (e.g. an Electron utilityProcess) sets
+    // RR_BRIDGE — the harness streams its WorkflowEvents over process.parentPort
+    // instead of mounting Ink/JSONL.
     const bridgeMode = !!process.env.RR_BRIDGE;
     const useInk = isTTY && !jsonlMode && !bridgeMode;
 
