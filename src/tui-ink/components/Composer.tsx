@@ -37,7 +37,7 @@ import { TextInput } from './TextInput';
 import { EffortSlider } from './EffortSlider';
 import { UltraSplash } from './UltraSplash';
 import type { Effort } from '../../effort-presets';
-import { shortPath } from '../path-utils';
+import { shortPath } from '../short-path';
 import { SPINNER_FRAMES, SPINNER_TICK_MS } from '../spinner-frames';
 
 type Field = 'query' | 'web' | 'scan' | 'output' | 'model' | 'reranker' | 'effort';
