@@ -18,7 +18,6 @@ export {
   createServedReranker,
   makeServedRunner,
   createServedChannels,
-  type ServedSubstrate,
 } from "./served-runtime";
 export { runServedSession } from "./served-session";
 export { RunnerCtx } from "./runner-ctx";

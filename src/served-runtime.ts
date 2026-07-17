@@ -24,16 +24,6 @@ import type { Runner } from "./runner-ctx";
 import type { WorkflowEvent, Command, Config } from "./tui-ink";
 import type { ConfigOrigin } from "./tui-ink/config";
 
-/** The per-session compute substrate a host materialises and the harness runs on.
- *  Structurally the payload half of `@lloyal-labs/host`'s `Materialised` (a driver
- *  adds `dispose`), typed here in reasoning.run's OWN terms so this stays
- *  host-agnostic. */
-export interface ServedSubstrate {
-  context: SessionContext;
-  uiChannel: EventBus<WorkflowEvent>;
-  commands: Signal<Command, void>;
-}
-
 /**
  * Build one `SessionContext` over the resident model. Called once per admitted
  * Session (in the host's `materialise`); lloyal.node's ModelRegistry weak-caches
