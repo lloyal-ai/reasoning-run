@@ -2,9 +2,11 @@
 /**
  * reasoning.run — entry point for `npx reasoning.run`.
  *
- * Loads the pre-built ESM bundle. Source is not shipped — see
- * `package.json` `files` whitelist. Build with `npm run build`
- * (also invoked automatically on `npm publish` via prepublishOnly).
+ * Loads the pre-built ESM bundle (dist/bundle.mjs) — self-contained, with
+ * the .eta prompts inlined at build time, for a fast dependency-free start.
+ * The TS source ALSO ships (`src` is in `package.json` `files`) so consumers
+ * can import the `.` / `./protocol` / `./state` subpaths and bundle from
+ * source. Build with `npm run build` (also run on publish via prepublishOnly).
  */
 
 import("../dist/bundle.mjs")
