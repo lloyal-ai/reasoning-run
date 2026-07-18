@@ -2,7 +2,12 @@
  * Served (B-host) placement — the harness-FREE half: the per-session compute
  * substrate + the served `Runner` factory. Kept separate from {@link runServedSession}
  * (which imports the `harness` + its `.eta` prompts, so it must be esbuilt) so these
- * factories stay importable under plain `tsx` and unit-testable without a model.
+ * factories are importable + unit-testable under plain `tsx` WITHOUT a model or the
+ * harness's `.eta` — by an importer of THIS file directly (e.g. `__served-smoke.ts`).
+ * NOTE: the public `./runner` index re-exports {@link runServedSession} too, so
+ * importing `reasoning.run/runner` DOES pull the harness + `.eta`; the split is an
+ * internal build seam (isolate the harness to one esbuilt file), not a harness-free
+ * external subpath. A driver imports `./runner` and esbuilds it regardless.
  *
  * Under Placement B one process holds ONE resident model (lloyal.node's native
  * ModelRegistry weak-caches it by path) and N `SessionContext`s each run an
@@ -89,13 +94,21 @@ const SERVED_ORIGIN: ConfigOrigin = {
 /** Deep-merge a `saveConfig` patch into a served config — same nested-object merge
  *  the file loader uses (`config.ts` `readFileIfExists`), but purely in-memory. */
 function mergeServedConfig(base: Config, patch: Partial<Config>): Config {
+  const sources = { ...base.sources, ...(patch.sources ?? {}) };
+  const model = { ...base.model, ...(patch.model ?? {}) };
+  // Match the edge loader (`config.ts`): an empty-string path CLEARS the key — so
+  // `outputDir ?? cwd` and the model-path fallbacks still fire — and `version` is
+  // pinned so a patch can never rewrite it.
+  if (sources.outputDir === "") delete sources.outputDir;
+  if (model.path === "") delete model.path;
   return {
     ...base,
     ...patch,
-    sources: { ...base.sources, ...(patch.sources ?? {}) },
+    version: 1,
+    sources,
     apps: { ...base.apps, ...(patch.apps ?? {}) },
     defaults: { ...base.defaults, ...(patch.defaults ?? {}) },
-    model: { ...base.model, ...(patch.model ?? {}) },
+    model,
   };
 }
 

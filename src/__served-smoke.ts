@@ -62,5 +62,10 @@ ok(r2.config().sources.outputDir === undefined, "a second session does NOT see S
 ok(r1.config() !== r2.config(), "each session gets its own config clone");
 ok(r1.windDown !== r2.windDown && r1.cancelAgent !== r2.cancelAgent, "wind-down / cancel signals are per-session");
 
+// ── edge-loader parity: an empty-string path clears the key (fresh runner) ──
+const rc = makeServedRunner(cfg, rerankerA);
+ok(rc.saveConfig({ sources: { outputDir: "/x" } }).config.sources.outputDir === "/x", "saveConfig sets outputDir");
+ok(rc.saveConfig({ sources: { outputDir: "" } }).config.sources.outputDir === undefined, "saveConfig clears outputDir on empty string (edge-loader parity)");
+
 console.log(failures === 0 ? "all passed" : `${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);
