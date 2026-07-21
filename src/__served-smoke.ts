@@ -70,10 +70,14 @@ ok(rc.saveConfig({ sources: { outputDir: "" } }).config.sources.outputDir === un
 // ── gpu backend steering (rig's createReranker has no loadOptions passthrough) ──
 delete process.env.LLOYAL_GPU;
 delete process.env.LLOYAL_NO_FALLBACK;
-applyServedGpuEnv(cfg); // cfg.model.gpu is unset (Metal)
-ok(process.env.LLOYAL_GPU === undefined && process.env.LLOYAL_NO_FALLBACK === undefined, "no gpu config → LLOYAL_GPU / NO_FALLBACK untouched (Metal)");
+applyServedGpuEnv(cfg); // cfg.model.gpu unset, clean env
+ok(process.env.LLOYAL_GPU === undefined && process.env.LLOYAL_NO_FALLBACK === undefined, "no gpu config + clean env → LLOYAL_GPU / NO_FALLBACK stay unset (Metal)");
 applyServedGpuEnv({ ...cfg, model: { ...cfg.model, gpu: "cuda" } });
 ok(process.env.LLOYAL_GPU === "cuda" && process.env.LLOYAL_NO_FALLBACK === "1", "gpu config → LLOYAL_GPU set (context+reranker parity) + fail-loud env");
+// an INHERITED LLOYAL_GPU is CLEARED when served config has no gpu (config wins)
+process.env.LLOYAL_GPU = "cuda";
+applyServedGpuEnv(cfg); // gpu unset
+ok(process.env.LLOYAL_GPU === undefined, "inherited LLOYAL_GPU cleared when served config has no gpu (config is source of truth)");
 delete process.env.LLOYAL_GPU;
 delete process.env.LLOYAL_NO_FALLBACK;
 

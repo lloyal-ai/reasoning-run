@@ -38,15 +38,21 @@ import type { ConfigOrigin } from "./tui-ink/config";
  * backend is an EXPLICIT deploy request → fail loud on an unavailable variant
  * (`LLOYAL_NO_FALLBACK`, never overriding a user-set one) instead of silently
  * loading on CPU. Idempotent + the same value across all served sessions (they share
- * the fixed host gpu config), so it never races. No-op on Metal (gpu unset).
+ * the fixed host gpu config), so it never races. With no gpu configured (Metal), any
+ * inherited `LLOYAL_GPU` is CLEARED — config stays the sole source of truth.
  * Exported for `__served-smoke.ts` only — NOT part of the `./runner` surface.
  */
 export function applyServedGpuEnv(cfg: Config): void {
   const gpu = cfg.model.gpu;
-  if (!gpu) return;
-  process.env.LLOYAL_GPU = gpu;
-  if (process.env.LLOYAL_NO_FALLBACK === undefined) {
-    process.env.LLOYAL_NO_FALLBACK = "1";
+  if (gpu) {
+    process.env.LLOYAL_GPU = gpu;
+    if (process.env.LLOYAL_NO_FALLBACK === undefined) {
+      process.env.LLOYAL_NO_FALLBACK = "1";
+    }
+  } else if (process.env.LLOYAL_GPU !== undefined) {
+    // No gpu in the served config → an inherited env value must not keep steering
+    // the loader (served config is the source of truth). Mirrors the edge applyGpuEnv.
+    delete process.env.LLOYAL_GPU;
   }
 }
 
@@ -121,11 +127,12 @@ const SERVED_ORIGIN: ConfigOrigin = {
 function mergeServedConfig(base: Config, patch: Partial<Config>): Config {
   const sources = { ...base.sources, ...(patch.sources ?? {}) };
   const model = { ...base.model, ...(patch.model ?? {}) };
-  // Match the edge loader (`config.ts`): an empty-string path CLEARS the key — so
-  // `outputDir ?? cwd` and the model-path fallbacks still fire — and `version` is
+  // Empty-string `outputDir` clears the key so `outputDir ?? cwd` fallbacks fire —
+  // mirrors `config.ts` `saveConfig` (which deletes an empty `outputDir`). `model.path`
+  // needs no such rule: a falsy path already resolves to the default (`resolveModelPath`,
+  // models.ts) and `createServedContext` rejects a falsy path outright. `version` is
   // pinned so a patch can never rewrite it.
   if (sources.outputDir === "") delete sources.outputDir;
-  if (model.path === "") delete model.path;
   return {
     ...base,
     ...patch,
