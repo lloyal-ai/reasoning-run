@@ -59,10 +59,15 @@ import { taskToContent } from "@lloyal-labs/rig";
 
 // ── Prompts ─────────────────────────────────────────────────────
 //
-// .eta files are inlined into the published bundle as string constants
-// via esbuild's text loader. At dev time tsx honors the same `*.eta` ->
-// string protocol via the eta.d.ts ambient declaration. No
-// fs.readFileSync, no shipped prompts/ directory at runtime.
+// The .eta sources are inlined into the bundle as string constants by
+// esbuild's `--loader:.eta=text` AT BUILD TIME, so the running bundle
+// reads no prompt files. Every placement bundles this harness — the CLI
+// (dist/bundle.mjs), a host that forks that bin, an in-process
+// model-runtime host — so it is always esbuilt, never executed as raw
+// TS: `eta.d.ts` is a TYPE-only shim (it satisfies tsc but provides no
+// runtime loader). The sources themselves DO ship (src/prompts/*.eta,
+// via the `files` whitelist that also carries the ./protocol/./state
+// source exports) — they're just carried inlined, not read from disk.
 
 import PREFLIGHT_RAW from "./prompts/preflight.eta";
 import PREFLIGHT_RECOVER_RAW from "./prompts/preflight-recover.eta";
