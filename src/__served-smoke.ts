@@ -6,7 +6,7 @@
  * (`createServedContext`/`createServedReranker` need real weights; the pilot covers
  * those). Same "prove the plumbing without a model" discipline as the host tests.
  */
-import { makeServedRunner, createServedChannels } from "./served-runtime";
+import { makeServedRunner, createServedChannels, applyServedGpuEnv } from "./served-runtime";
 import type { Config } from "./tui-ink";
 import type { Reranker } from "@lloyal-labs/rig";
 
@@ -66,6 +66,16 @@ ok(r1.windDown !== r2.windDown && r1.cancelAgent !== r2.cancelAgent, "wind-down 
 const rc = makeServedRunner(cfg, rerankerA);
 ok(rc.saveConfig({ sources: { outputDir: "/x" } }).config.sources.outputDir === "/x", "saveConfig sets outputDir");
 ok(rc.saveConfig({ sources: { outputDir: "" } }).config.sources.outputDir === undefined, "saveConfig clears outputDir on empty string (edge-loader parity)");
+
+// ── gpu backend steering (rig's createReranker has no loadOptions passthrough) ──
+delete process.env.LLOYAL_GPU;
+delete process.env.LLOYAL_NO_FALLBACK;
+applyServedGpuEnv(cfg); // cfg.model.gpu is unset (Metal)
+ok(process.env.LLOYAL_GPU === undefined && process.env.LLOYAL_NO_FALLBACK === undefined, "no gpu config → LLOYAL_GPU / NO_FALLBACK untouched (Metal)");
+applyServedGpuEnv({ ...cfg, model: { ...cfg.model, gpu: "cuda" } });
+ok(process.env.LLOYAL_GPU === "cuda" && process.env.LLOYAL_NO_FALLBACK === "1", "gpu config → LLOYAL_GPU set (context+reranker parity) + fail-loud env");
+delete process.env.LLOYAL_GPU;
+delete process.env.LLOYAL_NO_FALLBACK;
 
 console.log(failures === 0 ? "all passed" : `${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

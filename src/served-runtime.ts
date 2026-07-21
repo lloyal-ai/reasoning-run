@@ -30,6 +30,27 @@ import type { WorkflowEvent, Command, Config } from "./tui-ink";
 import type { ConfigOrigin } from "./tui-ink/config";
 
 /**
+ * Steer the native backend for BOTH the resident model context AND the reranker.
+ * rig's `createReranker` exposes no loadOptions passthrough (mirrors the edge
+ * runner's `applyGpuEnv`, `main.ts`): `process.env.LLOYAL_GPU` — read lazily by
+ * lloyal.node's `loadBinary` at context-create time — is the one lever that reaches
+ * them both, so it must match the context's explicit `gpuVariant`. A configured
+ * backend is an EXPLICIT deploy request → fail loud on an unavailable variant
+ * (`LLOYAL_NO_FALLBACK`, never overriding a user-set one) instead of silently
+ * loading on CPU. Idempotent + the same value across all served sessions (they share
+ * the fixed host gpu config), so it never races. No-op on Metal (gpu unset).
+ * Exported for `__served-smoke.ts` only — NOT part of the `./runner` surface.
+ */
+export function applyServedGpuEnv(cfg: Config): void {
+  const gpu = cfg.model.gpu;
+  if (!gpu) return;
+  process.env.LLOYAL_GPU = gpu;
+  if (process.env.LLOYAL_NO_FALLBACK === undefined) {
+    process.env.LLOYAL_NO_FALLBACK = "1";
+  }
+}
+
+/**
  * Build one `SessionContext` over the resident model. Called once per admitted
  * Session (in the host's `materialise`); lloyal.node's ModelRegistry weak-caches
  * the model by path, so the Nth call shares the same resident weights and only
@@ -43,6 +64,7 @@ export function createServedContext(cfg: Config): Promise<SessionContext> {
       "createServedContext: cfg.model.path is required (the host's resident model)",
     );
   }
+  applyServedGpuEnv(cfg);
   return createContext(
     {
       modelPath,
@@ -74,6 +96,9 @@ export function* createServedReranker(cfg: Config): Operation<Reranker> {
   if (!rerankPath) {
     throw new Error("createServedReranker: cfg.model.reranker is required");
   }
+  // rig's createReranker has no loadOptions passthrough — steer it (and keep it on
+  // the SAME backend as the context) via LLOYAL_GPU. See applyServedGpuEnv.
+  applyServedGpuEnv(cfg);
   return yield* createReranker(rerankPath, {
     nSeqMax: 10,
     nCtx: 16384,
