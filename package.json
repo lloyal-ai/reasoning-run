@@ -24,6 +24,7 @@
     "start": "npm run build && node bin/run.js",
     "smoke": "tsx src/tui-ink/__bus-smoke.ts && tsx src/tui-ink/__reducer-smoke.ts && tsx src/tui-ink/__config-smoke.ts && tsx src/__download-smoke.ts && tsx src/__rundir-smoke.ts && tsx src/__clarify-trunk-smoke.ts && tsx src/__ask-policy-smoke.ts && tsx src/__gpu-args-smoke.ts && tsx src/__served-smoke.ts",
     "smoke:visual": "tsx src/tui-ink/__visual-smoke.tsx",
+    "test:served": "esbuild src/__served-integration.ts --bundle --platform=node --target=node24 --format=esm --packages=external --loader:.eta=text --outfile=dist/__served-integration.mjs && node dist/__served-integration.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
