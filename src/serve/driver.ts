@@ -59,8 +59,10 @@ export function createServedHostDriver(
   opts: ServedHostDriverOpts,
 ): Operation<ServedHostDriver> {
   return resource(function* (provide) {
-    // Channels a connection creates BEFORE admission; `materialise` returns them so the
-    // socket (bound at connect time) and the harness share one bus/command pair.
+    // Channels a connection stashes BEFORE admission; `materialise` CLAIMS them (returns
+    // them AND removes the entry) so the socket (bound at connect time) and the harness
+    // share one bus/command pair. So `pending` holds ONLY not-yet-materialised sessions;
+    // the disconnect / terminal paths delete a still-un-claimed entry.
     const pending = new Map<string, Channels>();
     const buildContext = opts.buildContext ?? (() => createServedContext(cfg));
 
@@ -68,6 +70,8 @@ export function createServedHostDriver(
       async materialise(sessionId: string): Promise<Materialised<SessionContext>> {
         const ch = pending.get(sessionId);
         if (!ch) throw new Error(`serve: no channels for session ${sessionId}`);
+        pending.delete(sessionId); // claimed — the harness owns the channels now; a repeat
+        // materialise of this id now fails loud above instead of silently reusing them.
         const context = await buildContext();
         return {
           context,
