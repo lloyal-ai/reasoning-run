@@ -43,6 +43,10 @@ main(function* () {
   const cfg = resolveConfig();
   const port = envInt("PORT", 8787);
   const maxNativeSessions = envInt("MAX_SESSIONS", 8);
+  // Default to loopback: the pilot is no-auth, and ws's default all-interfaces bind for
+  // `{ port }` would expose an unauthenticated model service on the LAN. `HOST=0.0.0.0`
+  // is an explicit opt-in once an operator fronts it with auth/TLS.
+  const bindHost = process.env.HOST ?? "127.0.0.1";
 
   const driver = yield* createServedHostDriver(cfg, {
     maxNativeSessions,
@@ -57,7 +61,7 @@ main(function* () {
       ),
   });
 
-  const server = new WebSocketServer({ port });
+  const server = new WebSocketServer({ port, host: bindHost });
   server.on("connection", (socket) => {
     // The `ws` socket structurally satisfies binding's `WsServerSocket` (send + on
     // message/close), but binding doesn't attach a `ws` 'error' handler — an unhandled
@@ -65,8 +69,10 @@ main(function* () {
     socket.on("error", () => {});
     driver.serveConnection(socket as unknown as WsServerSocket);
   });
+  // Plaintext ws:// — TLS terminates upstream (reverse proxy / the managed front door),
+  // never in this process, so label it "ws" (not "wss") for operators.
   console.log(
-    `[serve] wss listening on :${port} — up to ${maxNativeSessions} sessions over ${cfg.model.path}`,
+    `[serve] ws listening on ${bindHost}:${port} — up to ${maxNativeSessions} sessions over ${cfg.model.path}`,
   );
 
   yield* suspend(); // run until the process is signalled (main handles SIGINT/SIGTERM)

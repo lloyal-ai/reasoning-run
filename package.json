@@ -29,7 +29,7 @@
     "serve": "npm run build:serve && node bin/serve.js",
     "test:serve-loopback": "tsx src/__serve-loopback.ts",
     "test:serve-nsession": "esbuild src/__serve-nsession.ts --bundle --platform=node --target=node24 --format=esm --packages=external --loader:.eta=text --outfile=dist/__serve-nsession.mjs && node dist/__serve-nsession.mjs",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build && npm run build:serve"
   },
   "dependencies": {
     "@inkjs/ui": "^2.0.0",

@@ -92,31 +92,46 @@ export function createServedHostDriver(
 
     function serveConnection(socket: WsServerSocket): void {
       const sessionId = randomUUID();
-      const { uiChannel, commands } = createServedChannels();
-      pending.set(sessionId, { uiChannel, commands });
-      // Bind the run plane NOW: events buffer on the bus until the harness subscribes
-      // (EventBus replays to its first subscriber); `postSession` writes the session plane.
-      const postSession = wss<WorkflowEvent, Command>(socket, {
-        uiChannel,
-        dispatch: (c) => commands.send(c),
-        bootstrap: [],
-        sessionId,
-      });
-      // Client disconnect at ANY phase → release (queued=drop, warming=discard, live=halt).
-      // `release()` returns the harness's halt promise, which CAN reject (a teardown
-      // failure) — swallow it (matching the host's own internal fire-and-forget cancel)
-      // so a disconnect can't surface as an unhandled rejection.
-      socket.on("close", () => {
-        host.release(sessionId).catch(() => {});
+      try {
+        const { uiChannel, commands } = createServedChannels();
+        pending.set(sessionId, { uiChannel, commands });
+        // Bind the run plane NOW: events buffer on the bus until the harness subscribes
+        // (EventBus replays to its first subscriber); `postSession` writes the session plane.
+        const postSession = wss<WorkflowEvent, Command>(socket, {
+          uiChannel,
+          dispatch: (c) => commands.send(c),
+          bootstrap: [],
+          sessionId,
+        });
+        // Client disconnect at ANY phase → release (queued=drop, warming=discard, live=halt).
+        // `release()` returns the harness's halt promise, which CAN reject (a teardown
+        // failure) — swallow it (matching the host's own internal fire-and-forget cancel)
+        // so a disconnect can't surface as an unhandled rejection.
+        socket.on("close", () => {
+          host.release(sessionId).catch(() => {});
+          pending.delete(sessionId);
+        });
+        host.admit({
+          sessionId,
+          onState: (s: SessionState) => {
+            postSession(s);
+            if (s.phase === "reaped" || s.phase === "died") pending.delete(sessionId);
+          },
+        });
+      } catch (err) {
+        // `serveConnection` runs inside the ws "connection" emit — a synchronous setup
+        // failure here would escape into the emit and take the WHOLE host down (every
+        // other live Session with it). Contain it to THIS connection: free its slot,
+        // release any partial admission, best-effort close the socket, and let the rest
+        // keep serving. (`WsServerSocket` doesn't declare `close`; the real ws socket has
+        // it — call it if present.)
         pending.delete(sessionId);
-      });
-      host.admit({
-        sessionId,
-        onState: (s: SessionState) => {
-          postSession(s);
-          if (s.phase === "reaped" || s.phase === "died") pending.delete(sessionId);
-        },
-      });
+        host.release(sessionId).catch(() => {});
+        (socket as { close?: () => void }).close?.();
+        console.error(
+          `[serve] connection setup failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     yield* provide({
