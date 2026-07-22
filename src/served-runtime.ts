@@ -75,7 +75,11 @@ export function createServedContext(cfg: Config): Promise<SessionContext> {
     {
       modelPath,
       nCtx: cfg.model.nCtx ?? 32768,
-      nSeqMax: 64,
+      // Hybrid (Gated DeltaNet) recurrent state is allocated PER SEQUENCE (f32,
+      // ~50 MiB/seq × 32 layers) — it scales with nSeqMax, unlike the shared
+      // attention KV. 64 cost ~3.14 GB/session of recurrent state; size this to
+      // the real max branch fan-out.
+      nSeqMax: 24,
       typeK: "q4_0",
       typeV: "q4_0",
     },
