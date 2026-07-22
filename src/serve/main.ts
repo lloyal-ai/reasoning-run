@@ -62,6 +62,13 @@ main(function* () {
   });
 
   const server = new WebSocketServer({ port, host: bindHost });
+  // Server-level errors are almost always a bind failure (EADDRINUSE / EACCES). Without a
+  // listener Node rethrows the EventEmitter 'error' as an uncaught exception with a bare
+  // stack — surface an actionable message + exit non-zero for the operator/orchestrator.
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    console.error(`[serve] failed to bind ${bindHost}:${port} — ${err.code ?? err.message}`);
+    process.exit(1);
+  });
   server.on("connection", (socket) => {
     // The `ws` socket structurally satisfies binding's `WsServerSocket` (send + on
     // message/close), but binding doesn't attach a `ws` 'error' handler — an unhandled
