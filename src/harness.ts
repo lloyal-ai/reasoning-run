@@ -50,12 +50,14 @@ import type { AgentEvent, App, AgentRenderCtx, Agent, DefaultAgentPolicyOpts } f
 import type { StepEvent, OpTiming } from "./tui-ink";
 import {
   reportTool,
+  ReportTool,
   PlanTool,
   renderSpine,
   renderAgentPreamble,
 } from "@lloyal-labs/rig";
 import type { PlanResult, ResearchTask } from "@lloyal-labs/rig";
 import { taskToContent } from "@lloyal-labs/rig";
+import { weaveSourcesIntoResult } from "./weave-sources";
 
 // ── Prompts ─────────────────────────────────────────────────────
 //
@@ -100,6 +102,34 @@ const SYNTHESIZE_FLAT = parsePrompt(SYNTHESIZE_FLAT_RAW);
 export type { Effort } from "./effort-presets";
 
 /**
+ * The research pool's terminal `report` tool, extended with a grammar-forced
+ * structured `sources: [{title, url}]` field via rig's `ReportTool` schema seam
+ * (`extraProperties`/`extraRequired`). The pool captures only the `result` string;
+ * {@link SourceWeavingPolicy} reads the sibling `sources` off the same call and
+ * weaves them inline at capture (see {@link weaveSourcesIntoResult}). Recon keeps
+ * rig's plain `reportTool` — its coverage output isn't cited.
+ */
+const citedReportTool = new ReportTool({
+  description:
+    "Submit your final research findings with specific evidence, direct quotes, and data points. Cite each claim inline as [title](url) using the exact URL seen in tool results. Fill the sources field with the structured list of every source you used. State what you found AND what you checked but could not find. Do not summarize — preserve detail.",
+  resultDescription:
+    "Detailed findings with direct quotes and data points. Cite each claim inline as [title](url) using the exact URL seen in tool results. Include what was found and what was not found.",
+  extraProperties: {
+    sources: {
+      type: "array",
+      description:
+        "Every source you used: exact title and exact URL as seen in tool results. Empty array only if no URL sources exist.",
+      items: {
+        type: "object",
+        properties: { title: { type: "string" }, url: { type: "string" } },
+        required: ["title", "url"],
+      },
+    },
+  },
+  extraRequired: ["sources"],
+});
+
+/**
  * Research policy for a run effort + reasoning mode. `high` reproduces the
  * historical budget exactly. Parallel recovery is a flat-mode + low-effort
  * concern (a small cohort folded fast); everything else staggers — and the
@@ -130,8 +160,53 @@ function createResearchPolicy(
   };
   // Ask (skipPlanner): accept a direct free-text answer from context — 0 tool calls OK.
   // Non-Ask multi-agent research keeps the tool-gathering guard (a lazy research agent
-  // that answers without evidence is still pushed to research/recovery).
-  return isAsk ? new DirectAnswerPolicy(opts) : new DefaultAgentPolicy(opts);
+  // that answers without evidence is still pushed to research/recovery). Both branches
+  // extend SourceWeavingPolicy so a voluntary report() return is inline-cited at capture.
+  return isAsk ? new DirectAnswerPolicy(opts) : new SourceWeavingPolicy(opts);
+}
+
+/**
+ * Structured-sources citation weave (DRB FACT fix). The `report()` terminal tool
+ * carries a grammar-forced `sources: [{title, url}]` field (see
+ * {@link citedReportTool}); on a voluntary terminal return this override weaves
+ * those sources into the result string — bare source URLs become `[title](url)`
+ * plus an appended `Sources:` block (see {@link weaveSourcesIntoResult}) — BEFORE
+ * the string becomes `agent.result`. That single seam covers both downstream
+ * consumers of a voluntary return: the synthesis findings assembly and the
+ * annexure writer (both read `agent.result` / the `agent:return` event's `result`).
+ *
+ * `onProduced` is the base policy's PUBLIC entry point; the actual capture lives
+ * in its `private _handleTerminalTool`. Rather than reach into a private method,
+ * we post-process its result: `super.onProduced` returns `{type:'return', result}`
+ * with `result` = the plain `result` arg; we re-parse the same tool call for its
+ * sibling `sources` and weave. Non-return actions (nudge/idle/tool_call) and
+ * non-terminal or unparseable calls pass through untouched — matching the base's
+ * own JSON-parse fallback (raw arguments, no weave).
+ *
+ * KNOWN GAP: the RECOVERY capture path (an agent killed by pressure/time and
+ * force-recovered) sets `agent.result` inside `@lloyal-labs/lloyal-agents`'
+ * recovery path, which exposes no policy hook — so recovered agents' findings are
+ * NOT woven from here (the grammar still forces `sources`; they're just dropped at
+ * capture). Voluntary returns (the dominant path) are fully covered.
+ */
+class SourceWeavingPolicy extends DefaultAgentPolicy {
+  override onProduced(
+    ...args: Parameters<DefaultAgentPolicy["onProduced"]>
+  ): ReturnType<DefaultAgentPolicy["onProduced"]> {
+    const action = super.onProduced(...args);
+    if (action.type !== "return") return action;
+    const [, parsed, , config] = args;
+    const tc = parsed.toolCalls[0];
+    if (!tc || tc.name !== config.terminalToolName) return action;
+    let sources: unknown;
+    try {
+      sources = (JSON.parse(tc.arguments) as { sources?: unknown }).sources;
+    } catch {
+      // Base fell back to raw arguments (unparseable) — nothing to weave.
+      return action;
+    }
+    return { ...action, result: weaveSourcesIntoResult(action.result, sources) };
+  }
 }
 
 /**
@@ -146,7 +221,7 @@ function createResearchPolicy(
  * `createResearchPolicy(..., isAsk=true)`). Ask can still choose to gather evidence
  * (tool calls) — this only ensures a direct answer isn't discarded.
  */
-class DirectAnswerPolicy extends DefaultAgentPolicy {
+class DirectAnswerPolicy extends SourceWeavingPolicy {
   override onProduced(
     ...args: Parameters<DefaultAgentPolicy["onProduced"]>
   ): ReturnType<DefaultAgentPolicy["onProduced"]> {
@@ -154,6 +229,8 @@ class DirectAnswerPolicy extends DefaultAgentPolicy {
     if (!parsed.toolCalls[0] && parsed.content) {
       return { type: "free_text_return", content: parsed.content };
     }
+    // Report-tool returns flow through SourceWeavingPolicy's weave; synth (no
+    // terminal tool) and Ask free-text answers are unaffected (no-op weave).
     return super.onProduced(...args);
   }
 }
@@ -272,14 +349,28 @@ export interface PreflightResult {
 // ── Helpers ─────────────────────────────────────────────────────
 
 /**
+ * Content nudge for the structured `report()` sources field, appended to every
+ * research agent's per-task system prompt (see {@link appPreamble}). The grammar
+ * forces the field's SHAPE ({title, url} objects); this nudges its CONTENT toward
+ * real URLs from tool results (not corpus file paths) and inline citations. Kept
+ * as a clearly-separated trailing sentence.
+ */
+const REPORT_CITATION_NUDGE =
+  "\n\nWhen you call report(): cite each claim inline as [title](url) using the exact URL from tool results, and fill the sources field with every {title, url} you used (real URLs from tool results, not file paths).";
+
+/**
  * Per-spawn preamble for an agent assigned to `app`. `renderAgentPreamble`
  * prepends the boundary marker and renders the app's `skill.eta`; we merge the
  * app's own `source.promptData()` (corpus supplies `it.toc`; web supplies
  * nothing) into the render context, exactly as the old `renderWorkerPrompt`
- * spread `source.promptData()` into ctx.
+ * spread `source.promptData()` into ctx. The structured-sources citation nudge is
+ * appended last so research agents fill report()'s sources field with real URLs.
  */
 function appPreamble(app: App, ctx: AgentRenderCtx): string {
-  return renderAgentPreamble(app, ctx as AgentRenderCtx & Record<string, unknown>);
+  return (
+    renderAgentPreamble(app, ctx as AgentRenderCtx & Record<string, unknown>) +
+    REPORT_CITATION_NUDGE
+  );
 }
 
 /**
@@ -777,7 +868,12 @@ export function* runResearchPlan(
   // (RerankerCtx), so one pool-level scorer is equivalent regardless of which
   // app a given agent is assigned.
   const primaryScorer = primaryApp.source.createScorer(query);
-  const researchTools = [...apps.flatMap((a) => [...a.tools]), reportTool];
+  // citedReportTool replaces rig's reportTool for the research pool: same 'report'
+  // terminal name + no-op semantics, but its schema adds the required `sources`
+  // field (grammar-forced). Recon keeps rig's reportTool (its coverage output isn't
+  // cited). The pool builds the terminal grammar from `terminal:` below, so the
+  // registry entry and the `terminal:` arg MUST be the same tool.
+  const researchTools = [...apps.flatMap((a) => [...a.tools]), citedReportTool];
   const spinePrompt = renderSpineWithReferenceData(apps);
 
   let synthTimeMs = 0;
@@ -807,7 +903,7 @@ export function* runResearchPlan(
       const research = yield* agentPool({
         tools: researchTools,
         parent: querySpine,
-        terminal: reportTool,
+        terminal: citedReportTool,
         maxTurns: opts.maxTurns,
         pruneOnReturn: true,
         policy: createResearchPolicy(opts.effort, opts.reasoningMode, opts.isAsk),
