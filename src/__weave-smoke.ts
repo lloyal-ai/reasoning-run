@@ -125,5 +125,12 @@ check(
   "Confirmed at [A](https://a.io).\n\nSources:\n- [A](https://a.io)",
 );
 
+// 13. a title with `[` / `]` is escaped so it can't break the link syntax
+check(
+  "bracketed title escaped",
+  weaveSourcesIntoResult("See https://a.io here.", [{ title: "Foo [Bar] Baz", url: "https://a.io" }]),
+  "See [Foo \\[Bar\\] Baz](https://a.io) here.\n\nSources:\n- [Foo \\[Bar\\] Baz](https://a.io)",
+);
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

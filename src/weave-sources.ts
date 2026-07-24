@@ -63,13 +63,16 @@ export function weaveSourcesIntoResult(result: unknown, sources: unknown): unkno
   let out = result;
   const lines: string[] = [];
   for (const { url, title } of clean) {
+    // Escape `[`/`]` in the title so a bracketed page title (e.g. "Foo [2024]")
+    // can't break the `[title](url)` markdown link syntax.
+    const safeTitle = title.replace(/[[\]]/g, "\\$&");
     const esc = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     // Capture a preceding `](` (already a link target) or `(` (parens) so those
     // occurrences are left untouched; a bare occurrence has no prefix → wrap it.
     // The trailing boundary stops a wrap part-way through a longer url.
     const re = new RegExp("(\\]\\(|\\()?" + esc + URL_BOUNDARY, "g");
-    out = out.replace(re, (m, pre) => (pre ? m : `[${title}](${url})`));
-    lines.push(`- [${title}](${url})`);
+    out = out.replace(re, (m, pre) => (pre ? m : `[${safeTitle}](${url})`));
+    lines.push(`- [${safeTitle}](${url})`);
   }
 
   if (lines.length > 0) {
