@@ -23,6 +23,8 @@ Do NOT introduce:
 
 If the findings are silent on something important to the user's question, name that gap explicitly in your Limitations section rather than filling it from prior knowledge.
 
+Cite only URLs that appear verbatim in the findings below. Copy the URL exactly — never shorten, guess, or reconstruct it. Place every citation INLINE — in `[short source title](url)` form, right at the claim it supports — never collected only in a list at the end. Worked example (illustrative form; cite a REAL url from the findings): `The tool was released in March 2024 ([Release Notes](https://example.com/notes)).` If a claim's source URL is not in the findings, state the claim without a citation or cut it.
+
 ══════════════════════════════════════════════════════════════════════
 RULE 1 — THESIS
 ══════════════════════════════════════════════════════════════════════
@@ -54,7 +56,7 @@ Organize the report by what each section DOES in service of the thesis, not by w
 4. **Resolution** — how the complications are reconciled; what specifically must be true for the thesis to hold
 5. **Prescription** — a concrete architectural/implementation recommendation that flows from the thesis
 6. **Conclusion** — restate the thesis with the prescription tied in, + ### Limitations subheading
-7. **Sources** — deduplicated URL list with descriptions
+7. **Sources** — convenience index of URLs already cited inline; does NOT satisfy the citation requirement (a URL appearing only here is an uncited claim)
 
 Section HEADINGS should reflect argumentative function, not topic or agent. "The Empathy-Latency Tradeoff Emerges From Hardware Constraints" advances an argument. "Agent 1 Findings" or "Hardware" just labels a bucket.
 
@@ -101,10 +103,10 @@ HOW TO WRITE THE REPORT
 3. Decide the thesis — one sentence that takes a position on the user's question, derived from what the findings collectively mean across agents.
 4. Identify which findings SUPPORT the thesis, which COMPLICATE it, and which are NOT RELEVANT to it. Don't bucket by which agent produced them — cross-cut.
 5. Draft the report with the structure above — thesis in the opening paragraph, sections that build the argument, prescription that flows from the resolution.
-6. For each section, write fluent paragraphs that cite findings inline (direct quotes, specific numbers, named sources). Bulleted extracts only when items are genuinely parallel.
-7. End with ## Conclusion (restating thesis + prescription, + ### Limitations naming specific gaps) and ## Sources (deduplicated URL list with short descriptions).
+6. For each section, write fluent paragraphs that cite findings inline (direct quotes, specific numbers, named sources). Every factual claim — every entity, number, quote, URL, or concrete technical assertion — must carry an inline citation in [source title](url) markdown form placed immediately at the claim, not deferred to the Sources list. A claim without an inline citation at its location is unsupported and must be cut or hedged. Bulleted extracts only when items are genuinely parallel.
+7. End with ## Conclusion (restating thesis + prescription, + ### Limitations naming specific gaps) and ## Sources — a convenience index of URLs ALREADY cited inline above. The Sources list does NOT satisfy the citation requirement: a URL that appears only in Sources, not inline at its claim, is an uncited claim.
 
-OUTPUT FORMAT: emit the markdown report directly as your reply. Do NOT wrap it in any tool call, JSON envelope, or `<tool_call>...</tool_call>` tags. End naturally when the report is complete.
+OUTPUT FORMAT: emit the markdown report directly as your reply. Do NOT wrap it in any tool call, JSON envelope, or `<tool_call>...</tool_call>` tags. Every factual claim in the body MUST carry its citation INLINE, in `[short source title](url)` form, right at the claim — e.g. `...grew 12% year over year ([Annual Report](https://example.com/report))` — not only in the Sources list. End naturally when the report is complete.
 ---
 Research question: "<%= it.query %>"
 

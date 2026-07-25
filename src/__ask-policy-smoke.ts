@@ -39,9 +39,16 @@ const harnessSrc = fs.readFileSync(path.join(process.cwd(), "src/harness.ts"), "
 const mainSrc = fs.readFileSync(path.join(process.cwd(), "src/main.ts"), "utf8");
 
 check("harness.ts: SynthPolicy renamed to DirectAnswerPolicy (shared by synth + Ask)", () => {
+  // DirectAnswerPolicy now extends SourceWeavingPolicy (the DRB citation-weave
+  // base), which itself extends DefaultAgentPolicy — so Ask/synth report()
+  // returns are inline-cited too.
   assert.ok(
-    /class DirectAnswerPolicy extends DefaultAgentPolicy/.test(harnessSrc),
-    "expected `class DirectAnswerPolicy extends DefaultAgentPolicy`",
+    /class DirectAnswerPolicy extends SourceWeavingPolicy/.test(harnessSrc),
+    "expected `class DirectAnswerPolicy extends SourceWeavingPolicy`",
+  );
+  assert.ok(
+    /class SourceWeavingPolicy extends DefaultAgentPolicy/.test(harnessSrc),
+    "expected `class SourceWeavingPolicy extends DefaultAgentPolicy`",
   );
   assert.ok(
     !harnessSrc.includes("SynthPolicy"),
@@ -69,8 +76,8 @@ check("harness.ts: createResearchPolicy takes isAsk + picks the class", () => {
     "createResearchPolicy must accept an `isAsk = false` param",
   );
   assert.ok(
-    /return isAsk\s*\?\s*new DirectAnswerPolicy\(opts\)\s*:\s*new DefaultAgentPolicy\(opts\)/.test(harnessSrc),
-    "createResearchPolicy must return DirectAnswerPolicy for Ask, DefaultAgentPolicy otherwise",
+    /return isAsk\s*\?\s*new DirectAnswerPolicy\(opts\)\s*:\s*new SourceWeavingPolicy\(opts\)/.test(harnessSrc),
+    "createResearchPolicy must return DirectAnswerPolicy for Ask, SourceWeavingPolicy otherwise",
   );
 });
 
