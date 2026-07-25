@@ -1,6 +1,6 @@
 {
   "name": "reasoning.run",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "A private reasoner for your terminal. Direct conversation or grounded multi-agent research, GPU-native and fully local. No API keys, no inference servers.",
   "bin": {
     "reasoning.run": "bin/run.js"
@@ -22,7 +22,7 @@
     "build": "esbuild src/main.ts --bundle --platform=node --target=node24 --format=esm --packages=external --loader:.eta=text --outfile=dist/bundle.mjs --minify --legal-comments=none",
     "build:watch": "esbuild src/main.ts --bundle --platform=node --target=node24 --format=esm --packages=external --loader:.eta=text --outfile=dist/bundle.mjs --watch",
     "start": "npm run build && node bin/run.js",
-    "smoke": "tsx src/tui-ink/__bus-smoke.ts && tsx src/tui-ink/__reducer-smoke.ts && tsx src/tui-ink/__config-smoke.ts && tsx src/__download-smoke.ts && tsx src/__rundir-smoke.ts && tsx src/__clarify-trunk-smoke.ts && tsx src/__ask-policy-smoke.ts && tsx src/__weave-smoke.ts && tsx src/__gpu-args-smoke.ts && tsx src/__served-smoke.ts && tsx src/__serve-loopback.ts",
+    "smoke": "tsx src/tui-ink/__bus-smoke.ts && tsx src/tui-ink/__reducer-smoke.ts && tsx src/tui-ink/__config-smoke.ts && tsx src/__download-smoke.ts && tsx src/__rundir-smoke.ts && tsx src/__clarify-trunk-smoke.ts && tsx src/__ask-policy-smoke.ts && tsx src/__prompt-override-smoke.ts && tsx src/__weave-smoke.ts && tsx src/__gpu-args-smoke.ts && tsx src/__served-smoke.ts && tsx src/__serve-loopback.ts",
     "smoke:visual": "tsx src/tui-ink/__visual-smoke.tsx",
     "test:served": "esbuild src/__served-integration.ts --bundle --platform=node --target=node24 --format=esm --packages=external --loader:.eta=text --outfile=dist/__served-integration.mjs && node dist/__served-integration.mjs",
     "build:serve": "esbuild src/serve/main.ts --bundle --platform=node --target=node24 --format=esm --packages=external --loader:.eta=text --outfile=dist/serve.mjs",
@@ -34,13 +34,13 @@
   "dependencies": {
     "@inkjs/ui": "^2.0.0",
     "@lloyal-labs/binding": "^0.1.0",
-    "@lloyal-labs/corpus-app": "https://apps.lloyal.ai/v1/bundles/lloyal__corpus-1.2.0.tgz",
+    "@lloyal-labs/corpus-app": "https://apps.lloyal.ai/v1/bundles/lloyal__corpus-1.3.0.tgz",
     "@lloyal-labs/host": "^0.1.0",
-    "@lloyal-labs/lloyal-agents": "^3.2.0",
+    "@lloyal-labs/lloyal-agents": "^3.4.0",
     "@lloyal-labs/lloyal.node": "^3.1.0",
     "@lloyal-labs/rig": "^3.7.0",
     "@lloyal-labs/sdk": "^3.0.3",
-    "@lloyal-labs/web-app": "https://apps.lloyal.ai/v1/bundles/lloyal__web-1.2.0.tgz",
+    "@lloyal-labs/web-app": "https://apps.lloyal.ai/v1/bundles/lloyal__web-1.3.0.tgz",
     "effection": "^4.0.2",
     "eta": "^4.5.1",
     "ignore": "^7.0.5",

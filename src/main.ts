@@ -149,6 +149,7 @@ import {
   singleTaskPlan,
   createCoverageCache,
   CoverageCacheCtx,
+  PromptsCtx,
   type Effort,
 } from "./harness";
 import {
@@ -457,6 +458,15 @@ export function* harness(
   // with this iteration's scope on /model or /reranker restart, which is
   // correct — those can change the enabled-app set.
   yield* CoverageCacheCtx.set(yield* createCoverageCache());
+
+  // The project's prompt-override dir, cwd-relative to match harness.json's
+  // DEFAULT_CONFIG_PATH convention. Set here so BOTH runMain and
+  // runServedSession (which both drive harness()) pick it up, and ONLY when it
+  // exists — an absent `prompts/` keeps the RACE/DRB-tuned baked defaults with
+  // no prompt-file I/O (see resolvePrompt). A harness author overrides a prompt
+  // by dropping `prompts/<name>.eta` into the project tree.
+  const promptsDir = path.join(process.cwd(), "prompts");
+  if (fs.existsSync(promptsDir)) yield* PromptsCtx.set(promptsDir);
 
   // Enable the corpus app first so installed()[0] is corpus when present
   // (matches the old sources[0] primacy). It only enables when the user

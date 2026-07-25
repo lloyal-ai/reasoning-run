@@ -31,6 +31,8 @@
 
 import { call, resource, createContext } from "effection";
 import type { Operation } from "effection";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { EFFORT_PRESETS, type Effort } from "./effort-presets";
 import type { Session, SessionContext } from "@lloyal-labs/sdk";
 import {
@@ -89,13 +91,57 @@ function parsePrompt(raw: string): { system: string; user: string } {
   };
 }
 
-const PREFLIGHT = parsePrompt(PREFLIGHT_RAW);
-const PREFLIGHT_RECOVER = parsePrompt(PREFLIGHT_RECOVER_RAW);
-const PLAN_DEEP = parsePrompt(PLAN_RAW);
-const PLAN_FLAT = parsePrompt(PLAN_FLAT_RAW);
-const RECOVERY = parsePrompt(RECOVERY_RAW);
-const SYNTHESIZE_DEEP = parsePrompt(SYNTHESIZE_RAW);
-const SYNTHESIZE_FLAT = parsePrompt(SYNTHESIZE_FLAT_RAW);
+/**
+ * The 7 baked prompts, keyed by override name. A project overrides any one by
+ * dropping `prompts/<name>.eta` into its tree (see {@link PromptsCtx} +
+ * {@link resolvePrompt}); an absent override dir uses these RACE/DRB-tuned
+ * defaults with ZERO disk I/O — trace-parity: an empty `prompts/` ≡ today.
+ */
+const BAKED = {
+  preflight: PREFLIGHT_RAW,
+  "preflight-recover": PREFLIGHT_RECOVER_RAW,
+  plan: PLAN_RAW,
+  "plan-flat": PLAN_FLAT_RAW,
+  recovery: RECOVERY_RAW,
+  synthesize: SYNTHESIZE_RAW,
+  "synthesize-flat": SYNTHESIZE_FLAT_RAW,
+} as const satisfies Record<string, string>;
+
+export type PromptName = keyof typeof BAKED;
+
+type Prompt = { system: string; user: string };
+
+/**
+ * The project's prompt-override directory, or null (baked defaults only). Set
+ * once per boot by the runner (`runMain`/`runServedSession`) to the project's
+ * `prompts/` dir — but ONLY when it exists, so the default (no dir) is truly
+ * zero-I/O. Mirrors {@link CoverageCacheCtx}. Default null → `.get()` returns
+ * null when unset → the baked path.
+ */
+export const PromptsCtx = createContext<string | null>("reasoning.promptsDir", null);
+
+const promptMemo = new Map<string, Prompt>();
+
+/**
+ * Resolve a prompt by name: `<promptsDir>/<name>.eta` if present, else the baked
+ * default. Memoized per `(dir,name)` — a present override reads disk at most
+ * once; the baked path never touches disk. `PromptsCtx` unset (the default) ⇒
+ * baked, no I/O.
+ */
+export function* resolvePrompt(name: PromptName): Operation<Prompt> {
+  const dir = (yield* PromptsCtx.get()) ?? null;
+  const key = `${dir ?? ""}\u0000${name}`;
+  const hit = promptMemo.get(key);
+  if (hit) return hit;
+  let raw: string = BAKED[name];
+  if (dir) {
+    const file = join(dir, `${name}.eta`);
+    if (existsSync(file)) raw = readFileSync(file, "utf8");
+  }
+  const parsed = parsePrompt(raw);
+  promptMemo.set(key, parsed);
+  return parsed;
+}
 
 // Run-effort type + presets live in `./effort-presets` (shared, dep-free) so the
 // Settings UI can display the same policy values the harness applies here.
@@ -139,6 +185,7 @@ function createResearchPolicy(
   effort: Effort,
   mode: "flat" | "deep",
   isAsk = false,
+  recoveryPrompt: Prompt,
 ): DefaultAgentPolicy {
   const preset = EFFORT_PRESETS[effort];
   const opts: DefaultAgentPolicyOpts = {
@@ -146,8 +193,8 @@ function createResearchPolicy(
     // Ask also salvages an involuntarily-dropped agent (pressure/time before it answers)
     // instead of skipping it below the 2-tool/100-token floor — its work shouldn't be lost.
     recovery: isAsk
-      ? { prompt: RECOVERY, minToolCalls: 0, minTokens: 0 }
-      : { prompt: RECOVERY },
+      ? { prompt: recoveryPrompt, minToolCalls: 0, minTokens: 0 }
+      : { prompt: recoveryPrompt },
     terminalToolName: "report",
     // low AND medium bin-pack recovery in-loop (parallel); high stays staggered
     // (serial, full-headroom, lossless). Deep is always staggered.
@@ -260,7 +307,7 @@ class ReconPolicy extends DefaultAgentPolicy {
   }
 }
 
-function createReconPolicy(): ReconPolicy {
+function createReconPolicy(recoverPrompt: Prompt): ReconPolicy {
   return new ReconPolicy({
     budget: {
       context: { softLimit: 2048, hardLimit: 1024 },
@@ -275,7 +322,7 @@ function createReconPolicy(): ReconPolicy {
     // `minToolCalls: 2` skips recovery on agents that only got ONE search
     // dispatched (the rest got nudged away) — which produced empty coverage
     // for the slow corpus probe. One probe is enough signal for recon.
-    recovery: { prompt: PREFLIGHT_RECOVER, minToolCalls: 1 },
+    recovery: { prompt: recoverPrompt, minToolCalls: 1 },
     terminalToolName: "report",
   });
 }
@@ -524,17 +571,19 @@ export function* runPreflight(
       tools: reconTools,
     },
     function* (reconSpine) {
+      const preflight = yield* resolvePrompt("preflight");
+      const reconRecover = yield* resolvePrompt("preflight-recover");
       const probe = yield* agentPool({
         tools: reconTools,
         parent: reconSpine,
         terminal: reportTool,
         maxTurns: RECON_MAX_TURNS,
         pruneOnReturn: true,
-        policy: createReconPolicy(),
+        policy: createReconPolicy(reconRecover),
         enableThinking: true,
         orchestrate: parallel(
           apps.map((app, i) => ({
-            content: renderTemplate(PREFLIGHT.user, {
+            content: renderTemplate(preflight.user, {
               query,
               date: currentDate,
               app: {
@@ -554,7 +603,7 @@ export function* runPreflight(
                     .promptData?.()?.toc ?? null,
               },
             }),
-            systemPrompt: PREFLIGHT.system,
+            systemPrompt: preflight.system,
             assignedApp: app.manifest.name,
             seed: 2000 + i,
           })),
@@ -675,7 +724,7 @@ export function* runPlanner(
   yield* send({ type: "query", query, warm: !!session.trunk });
 
   const currentDate = today();
-  const planPrompt = opts.reasoningMode === "flat" ? PLAN_FLAT : PLAN_DEEP;
+  const planPrompt = yield* resolvePrompt(opts.reasoningMode === "flat" ? "plan-flat" : "plan");
   // Grounded planner routing (RFC: multi-app composition). With ≥2 apps the
   // pre-flight recon agent has already probed each source and folded a coverage
   // summary into `opts.context`; passing `availableApps` re-adds the per-task
@@ -900,13 +949,14 @@ export function* runResearchPlan(
         yield* send({ type: "fanout:tasks", tasks });
       }
 
+      const recoveryPrompt = yield* resolvePrompt("recovery");
       const research = yield* agentPool({
         tools: researchTools,
         parent: querySpine,
         terminal: citedReportTool,
         maxTurns: opts.maxTurns,
         pruneOnReturn: true,
-        policy: createResearchPolicy(opts.effort, opts.reasoningMode, opts.isAsk),
+        policy: createResearchPolicy(opts.effort, opts.reasoningMode, opts.isAsk, recoveryPrompt),
         scorer: primaryScorer,
         enableThinking: true,
         orchestrate:
@@ -1012,8 +1062,9 @@ export function* runResearchPlan(
       yield* send({ type: "synthesize:start" });
       const synthT = startTimer();
 
-      const synthPrompt =
-        opts.reasoningMode === "flat" ? SYNTHESIZE_FLAT : SYNTHESIZE_DEEP;
+      const synthPrompt = yield* resolvePrompt(
+        opts.reasoningMode === "flat" ? "synthesize-flat" : "synthesize",
+      );
       const findings =
         opts.reasoningMode === "flat"
           ? research.agents
