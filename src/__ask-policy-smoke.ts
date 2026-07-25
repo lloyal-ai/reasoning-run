@@ -91,8 +91,8 @@ check("harness.ts: Ask relaxes recovery so a dropped Ask agent is salvaged, not 
 check("harness.ts: RunResearchPlanOpts declares isAsk + policy line threads it", () => {
   assert.ok(/isAsk\?:\s*boolean/.test(harnessSrc), "RunResearchPlanOpts missing `isAsk?: boolean`");
   assert.ok(
-    /createResearchPolicy\(opts\.effort,\s*opts\.reasoningMode,\s*opts\.isAsk\)/.test(harnessSrc),
-    "runResearchPlan must pass `opts.isAsk` into createResearchPolicy",
+    /createResearchPolicy\(opts\.effort,\s*opts\.reasoningMode,\s*opts\.isAsk,\s*recoveryPrompt\)/.test(harnessSrc),
+    "runResearchPlan must pass `opts.isAsk` (+ the resolved recoveryPrompt) into createResearchPolicy",
   );
 });
 
