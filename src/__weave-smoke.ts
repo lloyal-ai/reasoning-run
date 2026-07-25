@@ -132,5 +132,20 @@ check(
   "See [Foo \\[Bar\\] Baz](https://a.io) here.\n\nSources:\n- [Foo \\[Bar\\] Baz](https://a.io)",
 );
 
+// 14. right-boundary: a source that is a prefix up to a `.`-extension (`.pdf`) or a
+// longer domain must NOT corrupt the longer body url (the `.` there continues it).
+check(
+  "prefix before dot-extension not corrupted",
+  weaveSourcesIntoResult("See https://a.io/doc.pdf now.", [{ title: "Doc", url: "https://a.io/doc" }]),
+  "See https://a.io/doc.pdf now.\n\nSources:\n- [Doc](https://a.io/doc)",
+);
+
+// 15. but the exact source before a sentence-final period still wraps (period out)
+check(
+  "exact url before sentence period still wraps",
+  weaveSourcesIntoResult("Read https://a.io/doc. Done.", [{ title: "Doc", url: "https://a.io/doc" }]),
+  "Read [Doc](https://a.io/doc). Done.\n\nSources:\n- [Doc](https://a.io/doc)",
+);
+
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

@@ -33,9 +33,14 @@ export interface WeaveSource {
 // A source url must not wrap when the very next character continues a url — else
 // a declared root like `https://a.io` would corrupt a longer body url such as
 // `https://a.io/guide` into `[A](https://a.io)/guide`, and a query string
-// (`.../data?year=2024`) would be severed from its link. `.` is intentionally NOT
-// excluded so a sentence-final `https://a.io.` still wraps (period left outside).
-const URL_BOUNDARY = "(?![\\w/?#=&~%+@:-])";
+// (`.../data?year=2024`) would be severed from its link. Two lookaheads:
+//   1. the next char is NOT a direct url-continuation char, AND
+//   2. the next char is not a `.` that itself continues the url — i.e. a `.`
+//      followed by a word char or `/` (a file extension like `.pdf`, a longer
+//      domain like `.co.uk`, a subdomain). A `.` at end-of-string or before
+//      whitespace/punctuation is a sentence terminator, so a sentence-final
+//      `https://a.io.` still wraps (period left outside the link).
+const URL_BOUNDARY = "(?![\\w/?#=&~%+@:-])(?!\\.[\\w/])";
 
 export function weaveSourcesIntoResult(result: string, sources: unknown): string;
 export function weaveSourcesIntoResult(result: unknown, sources: unknown): unknown;
