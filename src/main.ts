@@ -40,7 +40,6 @@ import type { SessionContext } from "@lloyal-labs/sdk";
 import {
   initAgents,
   JsonlTraceWriter,
-  RerankerCtx,
   WindDown,
   CancelAgent,
   extractSpineSeed,
@@ -73,10 +72,19 @@ import {
   createInMemoryConfigStore,
   createAppRegistry,
 } from "@lloyal-labs/rig";
-import type { PlanResult, Reranker } from "@lloyal-labs/rig";
+import type { PlanResult } from "@lloyal-labs/rig";
 import type { AppRegistry, AppConfigStore } from "@lloyal-labs/lloyal-agents";
 import type { AppDescriptor } from "./tui-ink/state";
-import { createReranker } from "@lloyal-labs/rig/node";
+import {
+  resolveModel,
+  catalogEntry,
+  provisionAppModels,
+} from "@lloyal-labs/rig/node";
+import type {
+  ModelRole,
+  ModelSpec,
+  ModelCatalogEntry,
+} from "@lloyal-labs/rig/node";
 import { createWebApp } from "@lloyal-labs/web-app";
 import { createCorpusApp } from "@lloyal-labs/corpus-app";
 import { RunnerCtx, type Runner } from "./runner-ctx";
@@ -152,15 +160,101 @@ import {
   PromptsCtx,
   type Effort,
 } from "./harness";
-import {
-  downloadIfMissing,
-  resolveModelPath,
-  type ModelCatalogEntry,
-} from "./models";
+import { modelsRoot } from "./models";
 import { RunDirSink } from "./run-dir";
 import { resolvePath } from "./tui-ink/path-utils";
 
 const MAX_TOOL_TURNS = 10;
+
+// ── Model provisioning (rig contract) ────────────────────────────
+//
+// reasoning.run provisions models the platform way: rig's `resolveModel` for the
+// trunk LLM + `provisionAppModels` for app-declared services (the reranker), with
+// rig owning catalog resolution + fail-closed sha256 fetch + the
+// `models/<role>/<id>.gguf` slot layout under reasoning.run's shared XDG cache
+// (`modelsRoot()` = the `projectRoot` it hands rig).
+
+/** The platform-catalog ids reasoning.run defaults to when config names no model.
+ *  A `config.model.{path,reranker}` value that IS a catalog id maps to `{id}`;
+ *  any other value is an explicit `{path}` (rig trusts it by possession). */
+const LLM_DEFAULT_ID = "reasoning-4b";
+const RERANKER_DEFAULT_ID = "qwen3-reranker-0.6b-q8";
+
+/** A resolved model descriptor: the rig `{id|path}` spec plus (for an id spec)
+ *  its catalog entry and the `models/<role>/<id>.gguf` slot rig writes/reads.
+ *  The entry drives the download:* frame ids/labels; slot presence drives the
+ *  plan filter + the "will it fetch" check (mirrors the old resolveModelPath). */
+type ModelDesc = {
+  role: ModelRole;
+  spec: ModelSpec;
+  entry: ModelCatalogEntry | null;
+  slotPath: string;
+};
+
+/** Map a flat `config.model.*` string (or unset) to a rig ModelDesc. A catalog
+ *  id → `{id}` (fetched into the slot, digest-verified); any other string →
+ *  `{path}` (explicit, trusted by possession); unset → the role's catalog
+ *  default id. A stale pre-migration id (e.g. `qwen3.5-4b-q4`) isn't a rig id →
+ *  it falls to the `{path}` branch and errors clearly (file not found). */
+function modelDescriptor(
+  role: ModelRole,
+  value: string | undefined,
+  defaultId: string,
+): ModelDesc {
+  const spec: ModelSpec = !value
+    ? { id: defaultId }
+    : catalogEntry(role, value)
+      ? { id: value }
+      : { path: value };
+  if (spec.id) {
+    return {
+      role,
+      spec,
+      entry: catalogEntry(role, spec.id) ?? null,
+      slotPath: path.join(modelsRoot(), "models", role, `${spec.id}.gguf`),
+    };
+  }
+  return { role, spec, entry: null, slotPath: spec.path! };
+}
+
+/** Old flat cache filename → the rig (role, id) slot it should adopt. rig names
+ *  its slot `models/<role>/<id>.gguf`; a warm pre-migration download was flat
+ *  `models/<filename>.gguf`. Keyed off the 2 known catalog files. */
+const PRESEED_MAP: readonly { file: string; role: ModelRole; id: string }[] = [
+  { file: "Qwen3.5-4B-Q4_K_M.gguf", role: "llm", id: LLM_DEFAULT_ID },
+  {
+    file: "qwen3-reranker-0.6b-q8_0.gguf",
+    role: "reranker",
+    id: RERANKER_DEFAULT_ID,
+  },
+];
+
+/** Pre-seed rig's id-named slots from an existing flat warm download, so a
+ *  migrating user (or the packaged desktop app) adopts already-fetched weights
+ *  instead of re-downloading ~3.2GB. For each known file: if the flat
+ *  `<root>/models/<file>` exists and the `<root>/models/<role>/<id>.gguf` slot
+ *  does NOT, hardlink it into the slot (fallback copy) — NEVER rename/destroy the
+ *  warm file (other tools + the flat integration-test resolver still read it).
+ *  rig's slot-present short-circuit then adopts the slot with no re-fetch. */
+function preseedWarmWeights(root: string): void {
+  const flatDir = path.join(root, "models");
+  for (const { file, role, id } of PRESEED_MAP) {
+    const flat = path.join(flatDir, file);
+    const slot = path.join(flatDir, role, `${id}.gguf`);
+    if (!fs.existsSync(flat) || fs.existsSync(slot)) continue;
+    try {
+      fs.mkdirSync(path.dirname(slot), { recursive: true });
+      try {
+        fs.linkSync(flat, slot);
+      } catch {
+        // Cross-device / unsupported link → copy (never move: keep the warm original).
+        fs.copyFileSync(flat, slot);
+      }
+    } catch {
+      // Best-effort: a failure just means rig re-fetches into the slot.
+    }
+  }
+}
 
 // ── Planner context ──────────────────────────────────────────────
 
@@ -384,9 +478,9 @@ class HarnessExit extends Error {
 
 // ── harness — the Layer-3 entrypoint (platform contract) ─────────
 //
-// Runs INSIDE a runtime substrate the runner established (RerankerCtx via
-// `runner.reranker` below, plus the agent contexts `initAgents` sets). It reads
-// `RunnerCtx` for the edge-shell concerns it can't own. `events` is the UI
+// Runs INSIDE a runtime substrate the runner established (RerankerCtx via the
+// boot's `provisionAppModels`, plus the agent contexts `initAgents` sets). It
+// reads `RunnerCtx` for the edge-shell concerns it can't own. `events` is the UI
 // `WorkflowEvent` bus (the runner created it and bound a surface to it);
 // `agentEvents` (from `initAgents`) is the internal agent channel the forwarder
 // relays into `events` + `RunDirSink`. Ends on Session close (a bare `return`);
@@ -431,12 +525,12 @@ export function* harness(
   });
 
   // ── App registry (RFC §5.4) ────────────────────────────────
-  // Apps are born already-bound to the reranker; publish it on RerankerCtx
-  // so the corpus app's factory reads it. The registry owns each app's
-  // detached scope and tears them down on this iteration's scope exit.
-  // It also sets AppRegistryCtx, which the research pool reads to render
-  // the spine and resolve per-spawn tool scope.
-  yield* RerankerCtx.set(runner.reranker);
+  // The reranker is already published on RerankerCtx by the boot's
+  // `provisionAppModels` (edge boot / `runServedSession`), in the enclosing
+  // scope this harness runs in — so the corpus/web app factories read it on
+  // enable. The registry owns each app's detached scope and tears them down on
+  // this iteration's scope exit. It also sets AppRegistryCtx, which the research
+  // pool reads to render the spine and resolve per-spawn tool scope.
   // Provide the wind-down signal into the run scope; the research pool reads it
   // via WindDown.get() and drains on send. Absent ⇒ no wind-down (it's optional).
   yield* WindDown.set(runner.windDown);
@@ -1490,10 +1584,17 @@ export function runMain(): void {
     ? parseInt(flags["findings-budget"], 10)
     : undefined;
 
-  // Resolve catalog-id / explicit path / catalog-default for each model.
-  // Downloads happen later, pre-Ink, via ensureFile.
-  const llmResolved = resolveModelPath(liveConfig.model.path, "llm");
-  const rerankerResolved = resolveModelPath(liveConfig.model.reranker, "reranker");
+  // Pre-seed rig's id-named slots from any warm flat download BEFORE computing
+  // the initial plan, so an adopted weight isn't listed as needing a fetch.
+  preseedWarmWeights(modelsRoot());
+  // Map the flat config paths to rig specs + descriptors (catalog entry + slot).
+  // rig fetches + digest-verifies later, in the boot loop.
+  const llmDesc0 = modelDescriptor("llm", liveConfig.model.path, LLM_DEFAULT_ID);
+  const rerankerDesc0 = modelDescriptor(
+    "reranker",
+    liveConfig.model.reranker,
+    RERANKER_DEFAULT_ID,
+  );
 
   if (jsonlMode) setJsonlMode(true);
   if (verbose) setVerboseMode(true);
@@ -1526,8 +1627,8 @@ export function runMain(): void {
 
     // Replay-to-first-subscriber bus. Events sent between render() and Ink's
     // useEffect attachment get buffered and replayed — no timing assumptions.
-    // `send` is synchronous so callbacks like downloadIfMissing.onProgress
-    // can push directly.
+    // `send` is synchronous so rig's resolveModel / provisionAppModels
+    // onProgress callbacks can push directly.
     const uiChannel: EventBus<WorkflowEvent> = createBus<WorkflowEvent>();
     const commands = createSignal<Command, void>();
     // Graceful "Wrap up" signal — provided to the run scope via the agents WindDown
@@ -1613,12 +1714,12 @@ export function runMain(): void {
     // Compute initial download plan synchronously so it can be bootstrapped
     // alongside config:loaded (frame 1 already in the final shape; no
     // transition for Ink to leak — the phantom-entry bug).
-    const initialPlanEntries = [llmResolved, rerankerResolved]
-      .filter((r) => r.entry !== null && !fs.existsSync(r.path))
-      .map((r) => ({
-        id: r.entry!.id,
-        label: r.entry!.label,
-        sizeBytes: r.entry!.sizeBytes,
+    const initialPlanEntries = [llmDesc0, rerankerDesc0]
+      .filter((d) => d.entry !== null && !fs.existsSync(d.slotPath))
+      .map((d) => ({
+        id: d.entry!.id,
+        label: d.entry!.label,
+        sizeBytes: d.entry!.sizeBytes,
       }));
 
     let inkInstance: { unmount: () => void } | null = null;
@@ -1697,26 +1798,75 @@ export function runMain(): void {
 
     // ── Boot helpers (close over uiChannel, commands) ─────────────
 
-    function* ensureFile(
-      r: { path: string; entry: ModelCatalogEntry | null },
-    ): Operation<string> {
-      if (fs.existsSync(r.path)) return r.path;
-      if (!r.entry) {
-        throw new Error(
-          `Model not found: ${r.path}. ` +
-            `Pass --model <path> or use /model <path> to set a local .gguf file.`,
-        );
+    // Fetch (download-only) the LLM via rig's `resolveModel`, emitting the SAME
+    // download:start/progress/complete frames the reducer + BootStatus consume.
+    // Returns the resolved local path (createContext still owns the load). The
+    // catalog entry (present only for an id spec) drives the frame ids/labels; an
+    // explicit `{path}` spec has no entry, so rig resolves it as-is (no fetch, no
+    // frames). A digest-mismatch / network throw propagates → classified `llm`.
+    function* fetchLlm(desc: ModelDesc): Operation<string> {
+      const entry = desc.entry;
+      const willFetch = entry !== null && !fs.existsSync(desc.slotPath);
+      if (willFetch) {
+        uiChannel.send({
+          type: "download:start",
+          id: entry.id,
+          label: entry.label,
+          sizeBytes: entry.sizeBytes,
+        });
       }
-      const entry = r.entry;
-      uiChannel.send({
-        type: "download:start",
-        id: entry.id,
-        label: entry.label,
-        sizeBytes: entry.sizeBytes,
-      });
-      yield* call(() =>
-        downloadIfMissing(entry, {
+      const resolved = yield* call(() =>
+        resolveModel({
+          projectRoot: modelsRoot(),
+          role: "llm",
+          spec: desc.spec,
           onProgress: (got, total, url) => {
+            if (entry) {
+              uiChannel.send({
+                type: "download:progress",
+                id: entry.id,
+                got,
+                total,
+                url,
+              });
+            }
+          },
+        }),
+      );
+      if (willFetch) uiChannel.send({ type: "download:complete", id: entry!.id });
+      return resolved;
+    }
+
+    // Provision the reranker + app services via rig's `provisionAppModels`: it
+    // reads the KNOWN apps' static `services: ['reranker']`, fetches (if the slot
+    // is absent) AND loads the reranker, and publishes it on RerankerCtx in THIS
+    // scope — the scope harness() runs in, so registry.enable injects it. One rig
+    // call bundles fetch+load, so the reranker's download:complete + weights:label
+    // wrap that single call (a minor UX nuance vs the LLM's clean
+    // fetch-then-createContext). A fetch/load throw propagates → classified
+    // `reranker` → set_reranker_path recovery.
+    function* provisionReranker(desc: ModelDesc, label: string): Operation<void> {
+      const entry = desc.entry;
+      const willFetch = entry !== null && !fs.existsSync(desc.slotPath);
+      if (willFetch) {
+        uiChannel.send({
+          type: "download:start",
+          id: entry.id,
+          label: entry.label,
+          sizeBytes: entry.sizeBytes,
+        });
+      }
+      uiChannel.send({ type: "weights:label", label: `Loading ${label}…` });
+      yield* provisionAppModels({
+        apps: KNOWN_APPS.map((a) => a.factory),
+        projectRoot: modelsRoot(),
+        reranker: desc.spec,
+        // 10, not 8: the rerank architecture spends 2 leases on trunk +
+        // queryBranch; 10 keeps 8 effective scoring leaves. nCtx 16384 (rig
+        // defaults 4096) sizes the reranker for longer rerank inputs.
+        rerankerLoad: { nSeqMax: 10, nCtx: 16384 },
+        onProgress: (got, total, url) => {
+          if (entry) {
             uiChannel.send({
               type: "download:progress",
               id: entry.id,
@@ -1724,22 +1874,19 @@ export function runMain(): void {
               total,
               url,
             });
-          },
-        }),
-      );
-      uiChannel.send({ type: "download:complete", id: entry.id });
-      return r.path;
+          }
+        },
+      });
+      if (willFetch) uiChannel.send({ type: "download:complete", id: entry!.id });
     }
 
-    function planDownloads(
-      rs: ({ path: string; entry: ModelCatalogEntry | null })[],
-    ): void {
-      const entries = rs
-        .filter((r) => r.entry !== null && !fs.existsSync(r.path))
-        .map((r) => ({
-          id: r.entry!.id,
-          label: r.entry!.label,
-          sizeBytes: r.entry!.sizeBytes,
+    function planDownloads(descs: ModelDesc[]): void {
+      const entries = descs
+        .filter((d) => d.entry !== null && !fs.existsSync(d.slotPath))
+        .map((d) => ({
+          id: d.entry!.id,
+          label: d.entry!.label,
+          sizeBytes: d.entry!.sizeBytes,
         }));
       if (entries.length > 0) {
         uiChannel.send({ type: "download:plan", entries });
@@ -1903,29 +2050,21 @@ export function runMain(): void {
         // Re-plan downloads so the reducer transitions out of 'composer' into
         // a load phase. If nothing needs downloading, weights:start (inside
         // the boot loop) is the transition.
-        const llmNext = resolveModelPath(liveConfig.model.path, "llm");
-        const rerNext = resolveModelPath(liveConfig.model.reranker, "reranker");
-        planDownloads([llmNext, rerNext]);
+        planDownloads([
+          modelDescriptor("llm", liveConfig.model.path, LLM_DEFAULT_ID),
+          modelDescriptor(
+            "reranker",
+            liveConfig.model.reranker,
+            RERANKER_DEFAULT_ID,
+          ),
+        ]);
       }
 
       const iterCaptured = iteration;
       restartRequested = false;
       const task = yield* spawn(function* (): Operation<"quit" | "restart"> {
-        // Resolve paths fresh — picks up any harness.json changes from a
-        // prior /model write. modelName/rerankName fall back to basename
-        // when there's no catalog entry (raw path).
-        let llmResolvedNow = resolveModelPath(liveConfig.model.path, "llm");
-        let modelPathNow = llmResolvedNow.path;
-        let modelNameNow =
-          llmResolvedNow.entry?.label ?? path.basename(modelPathNow).replace(/-Q\w+\.gguf$/, "");
-        let rerankerResolvedNow = resolveModelPath(liveConfig.model.reranker, "reranker");
-        let rerankModelPathNow = rerankerResolvedNow.path;
-        let rerankNameNow =
-          rerankerResolvedNow.entry?.label ?? path.basename(rerankModelPathNow).replace(/-q\w+\.gguf$/i, "");
-        const nCtx = liveConfig.model.nCtx ?? 32768;
-
         let ctx: SessionContext | null = null;
-        let reranker: Reranker | null = null;
+        let servicesReady = false;
 
         // First iteration uses the bootstrapped plan (no bus emit needed).
         // Subsequent iterations re-plan via the bus since paths may have
@@ -1933,24 +2072,45 @@ export function runMain(): void {
         // (catch block below) handle their own emit.
         let firstBootIteration = iterCaptured === 0;
 
-        while (ctx === null || reranker === null) {
+        while (ctx === null || !servicesReady) {
+          // Re-derive descriptors per attempt from the CURRENT liveConfig — a
+          // /model, /reranker or /gpu recovery reloads liveConfig between
+          // attempts, and rig re-runs against the updated spec (so the recovery
+          // arms only persist + reload; no manual re-resolve). modelName/
+          // rerankName fall back to slot basename when there's no catalog entry.
+          const llmDesc = modelDescriptor(
+            "llm",
+            liveConfig.model.path,
+            LLM_DEFAULT_ID,
+          );
+          const rerankerDesc = modelDescriptor(
+            "reranker",
+            liveConfig.model.reranker,
+            RERANKER_DEFAULT_ID,
+          );
+          const modelNameNow =
+            llmDesc.entry?.label ??
+            path.basename(llmDesc.slotPath).replace(/-Q\w+\.gguf$/, "");
+          const rerankNameNow =
+            rerankerDesc.entry?.label ??
+            path.basename(rerankerDesc.slotPath).replace(/-q\w+\.gguf$/i, "");
+          const nCtx = liveConfig.model.nCtx ?? 32768;
           let lastFailedKind: "llm" | "reranker" | "backend-pack" = "llm";
           try {
             if (!firstBootIteration) {
-              planDownloads([llmResolvedNow, rerankerResolvedNow]);
+              planDownloads([llmDesc, rerankerDesc]);
             }
             firstBootIteration = false;
 
+            // LLM: rig fetches into models/llm/<id>.gguf (digest-verified) if the
+            // slot is absent, else adopts it. createContext still owns the load.
             lastFailedKind = "llm";
-            yield* ensureFile(llmResolvedNow);
-
-            lastFailedKind = "reranker";
-            yield* ensureFile(rerankerResolvedNow);
+            const modelPathNow = yield* fetchLlm(llmDesc);
 
             // Re-derive per attempt: a /gpu recovery command reloads liveConfig
-            // between attempts. The env lever must be set before EITHER
-            // createContext (loadBinary reads it lazily at call time) and is
-            // what steers the reranker below — rig has no loadOptions passthrough.
+            // between attempts. The env lever must be set before createContext
+            // (loadBinary reads it lazily at call time) and is what steers the
+            // reranker load below — rig has no loadOptions passthrough.
             applyGpuEnv({ config: liveConfig, origin: liveOrigin });
             const gpuNow = liveConfig.model.gpu;
 
@@ -1981,22 +2141,19 @@ export function runMain(): void {
               ),
             );
 
+            // Reranker + app services: provisionAppModels fetches (if absent) +
+            // loads the reranker and publishes it on RerankerCtx in THIS scope,
+            // for registry.enable inside harness(). Its resource disposes with
+            // this iteration's scope (same lifetime as the old createReranker).
             lastFailedKind = "reranker";
-            uiChannel.send({ type: "weights:label", label: `Loading ${rerankNameNow}…` });
-            // createReranker is an Effection resource() — yield it directly; it
-            // owns its model context and disposes on this scope's exit.
-            reranker = yield* createReranker(rerankModelPathNow, {
-              // 10, not 8: the rerank architecture spends 2 leases on
-              // trunk + queryBranch; 10 keeps 8 effective scoring leaves.
-              nSeqMax: 10,
-              nCtx: 16384,
-            });
+            yield* provisionReranker(rerankerDesc, rerankNameNow);
+            servicesReady = true;
           } catch (err) {
             if (ctx) {
               try { ctx.dispose?.(); } catch { /* best-effort */ }
               ctx = null;
             }
-            reranker = null;
+            servicesReady = false;
             uiChannel.send({
               type: "boot:error",
               kind: lastFailedKind,
@@ -2018,10 +2175,6 @@ export function runMain(): void {
             if (cmd.type === "set_model_path") {
               saveConfig({ model: { path: cmd.path } }, configPath);
               cliModelOverride = undefined;
-              llmResolvedNow = resolveModelPath(cmd.path, "llm");
-              modelPathNow = llmResolvedNow.path;
-              modelNameNow =
-                llmResolvedNow.entry?.label ?? path.basename(modelPathNow);
             } else if (cmd.type === "set_gpu") {
               // A no-fallback variant failure is the boot error /gpu exists to
               // recover from; the next attempt re-derives env from the reload.
@@ -2030,11 +2183,9 @@ export function runMain(): void {
             } else {
               saveConfig({ model: { reranker: cmd.path } }, configPath);
               cliRerankerOverride = undefined;
-              rerankerResolvedNow = resolveModelPath(cmd.path, "reranker");
-              rerankModelPathNow = rerankerResolvedNow.path;
-              rerankNameNow =
-                rerankerResolvedNow.entry?.label ?? path.basename(rerankModelPathNow);
             }
+            // The next while-iteration re-derives descriptors from the reloaded
+            // liveConfig and rig re-runs against the updated model.* spec.
             const reloaded = reloadLiveConfig();
             liveConfig = reloaded.config;
             liveOrigin = reloaded.origin;
@@ -2045,10 +2196,9 @@ export function runMain(): void {
         // (return / throw / halt) — gives us the per-restart teardown without
         // any explicit dispose call in the harness.
         const ctxFinal = ctx;
-        const rerankerFinal = reranker;
-        // The reranker is an Effection resource (createReranker) and disposes
-        // itself when this iteration's scope exits. ctx is not a resource, so it
-        // keeps its explicit teardown.
+        // ctx is not an Effection resource, so it keeps its explicit teardown.
+        // The reranker IS a resource (provisionAppModels) and disposes itself
+        // when this iteration's scope exits.
         yield* ensure(() => {
           try { ctxFinal.dispose?.(); } catch { /* best-effort */ }
         });
@@ -2073,7 +2223,6 @@ export function runMain(): void {
             if (patch.model?.gpu !== undefined) cliGpuOverride = undefined;
             restartRequested = true;
           },
-          reranker: rerankerFinal,
           windDown,
           cancelAgent,
           traceWriter,

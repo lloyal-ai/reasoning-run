@@ -19,7 +19,7 @@ export type Phase = 'idle' | 'recon' | 'query' | 'plan' | 'research' | 'synth' |
 export type UiPhase =
   | 'boot'           // before config:loaded
   | 'downloading'    // model cache miss — spinner + per-file progress bars
-  | 'loading'        // createContext / createReranker running; single spinner
+  | 'loading'        // createContext / provisionAppModels running; single spinner
   | 'composer'       // query input, source/mode editing
   | 'discovering'    // pre-flight recon agent probing sources; streams live
   | 'planning'       // planner running, spinner
