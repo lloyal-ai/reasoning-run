@@ -2,9 +2,10 @@
  * reasoning.run's `./runner` subpath — the served (B-host) placement surface.
  *
  * The reasoning.run-specific half a model-runtime host injects: build the
- * per-session compute substrate over ONE resident model, a per-session reranker
- * (its own KV context over the shared resident weights), and the served `Runner`
- * the harness reads from `RunnerCtx`. A driver assembles
+ * per-session compute substrate over ONE resident model and the served `Runner`
+ * the harness reads from `RunnerCtx`; `runServedSession` provisions a per-session
+ * reranker (its own KV context over the shared resident weights) via
+ * `provisionAppModels` and runs the harness over it. A driver assembles
  * `@lloyal-labs/host`'s `ServedHarness { materialise, run }` from these — the host
  * imports none of it, so neither side imports the other.
  *
@@ -15,7 +16,6 @@
  */
 export {
   createServedContext,
-  createServedReranker,
   makeServedRunner,
   createServedChannels,
 } from "./served-runtime";
