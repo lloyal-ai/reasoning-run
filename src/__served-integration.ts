@@ -4,7 +4,7 @@
  * Everything else green is static / model-free. This runs the REAL harness end to end
  * over the served substrate and proves `runServedSession` actually works:
  *   Phase 1 (boot): `createServedContext` loads the resident model and
- *     `runServedSession`'s `provisionAppModels` fetches/loads the reranker + sets
+ *     `runServedSession`'s `provisionAppModels` loads the reranker (explicit path, no fetch) + sets
  *     `RerankerCtx`; `RunnerCtx.set` + `initAgents` + app-enable all run, reaching
  *     `weights:done` + `ui:composer`.
  *   Phase 2 (query): a `skipPlanner` Ask direct-answer query → a terminal `answer` event
